@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   Computer,
+  Download,
   Folder,
   Heart,
   LoaderCircle,
@@ -22,7 +23,13 @@ import {
 import { useState } from "react";
 import type { Dot, DotAvatarKind, Snapshot } from "@/src/shared/types";
 import { activeDot, ownerId } from "./identity";
-import { localApi, useDetail, type LocalState } from "./use-local";
+import {
+  localApi,
+  useDetail,
+  type LocalState,
+  type SessionDetail,
+} from "./use-local";
+import { fileSizeLabel } from "./message-files";
 import { PetAvatar, type PetMood } from "./pet";
 import type { ComputerInfo } from "./computer";
 
@@ -383,11 +390,24 @@ export function DotIdentityCard({
     snapshot.eventsCursor,
     5000,
   );
-  const files = useDetail<{
-    files: { path: string; type: "file" | "directory" }[];
-  }>(`/dots/${dot.id}/computer/files`, snapshot.eventsCursor, 5000);
-  const outputs =
-    files.data?.files.filter((file) => file.type === "file").slice(0, 4) ?? [];
+  const sessionId =
+    dot.sessionId ??
+    snapshot.sessions.find(
+      (session) => session.kind === "dot" && ownerId(session) === dot.id,
+    )?.id;
+  const conversation = useDetail<SessionDetail>(
+    sessionId ? `/sessions/${sessionId}` : null,
+    snapshot.eventsCursor,
+  );
+  const outputs = [
+    ...new Map(
+      conversation.data?.messages
+        .slice()
+        .reverse()
+        .flatMap((message) => message.files ?? [])
+        .map((file) => [file.id, file]),
+    ).values(),
+  ].slice(0, 4);
   const desktop = computer.data?.desktop;
   return (
     <div className="dot-identity-wrap">
@@ -460,16 +480,22 @@ export function DotIdentityCard({
         </div>
         {outputs.length ? (
           outputs.map((file) => (
-            <Link key={file.path} href={`/dots/${dot.id}/computer?tab=files`}>
-              <Folder size={13} />
-              <span>{file.path.split("/").at(-1)}</span>
-            </Link>
+            <a
+              key={file.id}
+              href={`/api/local/files/${encodeURIComponent(file.id)}`}
+              download={file.name}
+              aria-label={`Download ${file.name}, ${fileSizeLabel(file.size)}`}
+              title={`Download ${file.name} · ${fileSizeLabel(file.size)}`}
+            >
+              <Download size={13} aria-hidden="true" />
+              <span>{file.name}</span>
+            </a>
           ))
         ) : (
           <p>
-            {files.error
+            {conversation.error
               ? "Files are unavailable."
-              : "Files created in its workspace appear here."}
+              : "Files your Dot shares with you appear here."}
           </p>
         )}
       </div>

@@ -3,6 +3,16 @@ import { config, internalToken } from "../../src/server/config";
 export interface WorkerContext {
   taskId: string;
   role: string;
+  isDotCoordinator: boolean;
+  dot?: { id: string; name: string; personality: string } | null;
+  userMessages?: { id: string; content: string }[];
+  workers?: {
+    id: string;
+    role: string;
+    title: string;
+    status: string;
+    sessionId: string;
+  }[];
   instructions: string;
   model: {
     modelId: string;

@@ -50,7 +50,7 @@ async function eventually<T>(
 }
 
 test(
-  "actual broker, production Eve, local provider and Docker complete coding with a reviewer",
+  "actual Dot coordinator delegates coding and review through production Eve, a local provider and Docker",
   {
     skip: process.env.CIT_TEST_EVE !== "1",
     timeout: 120_000,
@@ -202,8 +202,8 @@ test(
 
       const task = await request<Task>("/tasks", {
         prompt:
-          "fixture:coding Fix the calculator, run its test, and delegate a review.",
-        role: "coder",
+          "fixture:coordinator Ask a coding worker to fix the calculator and arrange a review.",
+        role: "coordinator",
         projectId: project.id,
         modelProfileId: model.id,
       });
@@ -215,13 +215,50 @@ test(
         operations: ToolOperation[];
       }>(`/tasks/${task.id}`);
       assert.equal(detail.children.length, 1);
-      assert.equal(detail.children[0].role, "reviewer");
+      assert.equal(detail.children[0].role, "coder");
       assert.equal(
         detail.children[0].status,
         "completed",
         detail.children[0].error,
       );
-      const command = detail.operations.find(
+      assert.doesNotMatch(finished.result ?? "", /```|export const|a \+ b/);
+      assert.deepEqual(
+        detail.operations.map((operation) => operation.toolName),
+        ["delegate"],
+      );
+      const coding = await request<{
+        task: Task;
+        children: Task[];
+        operations: ToolOperation[];
+      }>(`/tasks/${detail.children[0].id}`);
+      assert.equal(coding.children.length, 1);
+      assert.equal(coding.children[0].role, "reviewer");
+      assert.equal(
+        coding.children[0].status,
+        "completed",
+        coding.children[0].error,
+      );
+      const coordinatorRequests = fake.requests.filter((request) =>
+        request.messages.some(
+          (message) =>
+            typeof message.content === "string" &&
+            message.content.includes("fixture:coordinator"),
+        ),
+      );
+      assert.ok(coordinatorRequests.length > 0);
+      for (const request of coordinatorRequests) {
+        const offered = request.tools?.map((tool) => tool.function.name) ?? [];
+        assert.ok(offered.includes("delegate"));
+        assert.ok(
+          !offered.some((name) =>
+            ["read_file", "write_file", "list_files", "run_command"].includes(
+              name,
+            ),
+          ),
+          "Production Eve must offer the parent only coordinator tools.",
+        );
+      }
+      const command = coding.operations.find(
         (operation) => operation.toolName === "run_command",
       );
       assert(command && command.status === "completed");
@@ -251,6 +288,7 @@ test(
       // Approval travels through the same real broker, Eve workflow and runner.
       const approvalTask = await request<Task>("/tasks", {
         prompt: "fixture:approval Request the command's network permission.",
+        role: "coder",
         projectId: project.id,
         modelProfileId: model.id,
       });
@@ -275,6 +313,7 @@ test(
         chatDone,
         finished,
         detail.children[0],
+        coding.children[0],
         approved,
       ]) {
         assert(completedTask.eveSessionId);

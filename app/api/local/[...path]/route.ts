@@ -55,6 +55,14 @@ async function proxy(
           response.headers.get("content-type") || "application/json",
         "Cache-Control": "no-cache, no-transform",
         "X-Accel-Buffering": "no",
+        ...(response.headers.get("content-disposition")
+          ? {
+              "Content-Disposition": response.headers.get(
+                "content-disposition",
+              )!,
+              "X-Content-Type-Options": "nosniff",
+            }
+          : {}),
       },
     });
   } catch {

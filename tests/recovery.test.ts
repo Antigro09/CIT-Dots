@@ -53,6 +53,8 @@ function fixture(t: test.TestContext, events: WorkerEvent[] = []) {
     capabilities: { streaming: true, tools: true },
   });
   const session = broker.createSession({
+    kind: "chat",
+    dotId: null,
     title: "Recovery test",
     modelProfileId: model.id,
   });
@@ -130,6 +132,8 @@ test("uncertain prompt dispatch is interrupted and canceled instead of blindly r
 test("interrupting uncertain root delivery also stops child sessions during restart", async (t) => {
   const { broker, store, calls, task } = fixture(t);
   const childSession = broker.createSession({
+    kind: "work",
+    dotId: null,
     title: "Child investigation",
     modelProfileId: task.modelProfileId,
   });

@@ -1,6 +1,6 @@
 # Architecture and implementation plan
 
-CIT-Dots is a self-hosted assistant for one Ubuntu workstation. Its local web interface talks to a persistent agent service rather than keeping work alive in a browser tab. Local language models live in a separate inference service, so the workstation can change models without replacing the assistant framework.
+CIT-Dots is a self-hosted assistant for one Ubuntu workstation. A Dot is the persistent coordinator: it talks with the user, assigns work to specialist agents and explains their progress and results in plain language. Coding agents produce code in their own work sessions and workspaces. The local web interface talks to a persistent agent service rather than keeping work alive in a browser tab. Local language models live in a separate inference service, so the workstation can change models without replacing the assistant framework.
 
 ## Services and durable state
 
@@ -35,7 +35,9 @@ Dot sessions, tasks, goals, memories and inbox items belong to their Dot. Worker
 
 Standalone chat and work sessions have explicit null Dot ownership. The upper-right New chat action opens an empty conversation with Chat and Work modes. Legacy records without an ownership field migrate to the primary Dot; explicit null remains independent through migration and restart. Independent chat receives general context and its conversation history without private Dot memory or computer access. Independent work uses its approved project workspace. Deleting an extra Dot retains independent sessions.
 
-Each Dot has one stable main conversation. Temporary child/worker sessions retain their own execution history, while meaningful progress, results and questions from child workers and scheduled work also reach the Dot's main conversation and durable inbox. The user can follow that Dot's ongoing work in one conversation.
+Each Dot has one stable main conversation. Temporary child/worker sessions retain their own execution history and code output. The Dot delegates implementation and investigation instead of using the worker file and command tools itself. Its main conversation contains plain-language progress, summaries and questions, including work started by a schedule. Worker code and raw tool output stay in the work session and activity views; they are not copied into the Dot's replies. The user can follow that Dot's ongoing work in one conversation.
+
+When the user asks for a worker's output file, the Dot can forward a downloadable attachment from that worker's workspace. A delivered file is a durable snapshot with a source task reference; download cards do not render its contents as code in the Dot conversation. The broker checks task lineage, Dot ownership, the workspace path and the file size before creating the handoff. The identity panel's Output files list contains files actually shared in the Dot conversation. Other workspace files remain available through the computer's Files view. Standalone Chat and Work sessions retain Markdown and code rendering.
 
 Each Dot owns `.cit-data/dots/<dotId>/computer/{home,workspace,artifacts}`. Its Ubuntu 26.04/Xfce desktop is real, streamed with TigerVNC/noVNC for interactive browser, terminal and file-manager use. File and command tools use the trusted Dot's computer storage. Project tasks retain isolated project clones and explicit diff/apply semantics. Agent command operations for one Dot are serialized; separate Dots receive separate mounts.
 
@@ -48,6 +50,12 @@ The isolation boundary is a Docker container sharing the host kernel, not a VM. 
 ## How autonomy works
 
 An always-running process does not need to spend GPU time continuously. Accepted tasks and meaningful events trigger agent runs. A task can delegate research, implementation or review to specialist sub-agents, retain its session and produce a result later. Child agents share the same model server through bounded request concurrency; each child does not need its own model copy.
+
+The Dot can start a worker asynchronously with `delegate` and `wait:false`, inspect its state with `task_status`, and continue talking with the user while work runs. `send_worker_message` sends either a steering instruction or a queued follow-up to that worker's existing session. A completed worker can continue in the same task and workspace, preserving its conversation history. Delivery receipts and confirmed turn boundaries keep queued follow-ups from being mistaken for completed work.
+
+A confirmed asynchronous worker completion or failure wakes a coordinator review turn in the Dot's permanent conversation. The review checks the worker's evidence and can continue that worker or send a prose result, progress update or necessary question. Completion events are deduplicated and do not authorize file sharing. A review may retain the originating user's explicit request for that exact worker, so a request to create and send a file can finish without another prompt. Later user instructions replace that request context. Other past requests are not available as delivery permission.
+
+Direct messages to a Dot-owned Work session queue into its existing worker session through the coordinator; independent Work remains independent. Retrying a stopped Dot worker creates a coordinator that can delegate a new managed worker while preserving the existing workspace. Accepted queue and steer deliveries are tracked by their actual Eve delivery IDs, including when completion arrives before the send response. Each queued turn retains a separate worker message, and only the latest settled turn becomes its current result. Uncertain sends after a restart are interrupted for inspection rather than silently repeated.
 
 Idle services wait for work. User-defined one-time, interval or cron goals can trigger the same task workflow when due. This implementation does not add recurring check-in prompts, voice listening or a background loop that repeatedly asks a model to invent work. Future connectors should enqueue distinct events and deduplicate delivery before starting a run. A notification is appropriate when work completes, fails, needs user input or produces a material change.
 

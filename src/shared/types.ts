@@ -49,6 +49,8 @@ export interface Session extends BaseRecord {
   title: string;
   projectId: string | null;
   modelProfileId: string | null;
+  /** Dot-created Work sessions are distinct from independent user sessions. */
+  parentTaskId?: string;
 }
 
 export type MessageRole = "user" | "assistant" | "system" | "tool";
@@ -57,6 +59,12 @@ export interface Attachment {
   name: string;
   content: string;
 }
+export interface FileReference {
+  id: string;
+  name: string;
+  size: number;
+  sourceTaskId: string;
+}
 export interface Message extends BaseRecord {
   sessionId: string;
   role: MessageRole;
@@ -64,6 +72,7 @@ export interface Message extends BaseRecord {
   taskId?: string | null;
   kind?: MessageKind;
   attachments?: Attachment[];
+  files?: FileReference[];
 }
 
 export type TaskRole = "coordinator" | "coder" | "investigator" | "reviewer";
@@ -93,6 +102,21 @@ export interface Task extends BaseRecord {
   /** A crash while sending is uncertain; recovery must never blindly resend the prompt. */
   promptDispatch?: "sending" | "sent";
   assistantMessageId?: string;
+  /** Buffered coordinator output; never exposed in the public snapshot or chat stream. */
+  pendingOutput?: string;
+  pendingDeliveryIds?: string[];
+  pendingSend?: string;
+  lastBoundaryDeliveryIds?: string[];
+  deferredCompletion?: {
+    cursor?: number;
+    deliveryIds: string[];
+    assistantMessageId?: string;
+  };
+  triggeredByWorkerId?: string;
+  triggeredByWorkerCursor?: number;
+  /** Most recent coordinator request that authorized this worker's work. */
+  latestRequestTaskId?: string;
+  pendingUserDispatch?: boolean;
   reconnectAttempts?: number;
   reconnectAfterAt?: string;
   workspace?: Workspace;

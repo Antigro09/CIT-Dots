@@ -35,9 +35,10 @@ See [the operations runbook](docs/runbook.md) for desktop notifications, startup
 
 - A permanent primary Dot plus removable additional Dots, each with its own name, personality, pet and saved work.
 - An interactive Ubuntu 26.04/Xfce computer per Dot, with a browser, terminal and file manager; its home, workspace and artifacts persist when stopped.
-- Text chat and task progress, results, questions and errors in a persistent session.
+- One persistent Dot conversation with prose updates; implementation and code remain in worker sessions.
 - Independent chat and coding/work sessions without a Dot.
-- Coordinator, coding, investigation and review workers with bounded delegation.
+- A parent coordinator that starts coding, investigation and review workers, then steers or queues follow-ups in their existing Work sessions.
+- Requested worker files delivered as downloadable snapshots, without pasting code into the Dot conversation.
 - Registered project workspaces, Docker command execution and reviewable diffs.
 - Model profiles and snapshots for tasks, with concurrency and execution budgets.
 - User-defined one-time, interval and cron goals, plus explicit local memories.
@@ -66,7 +67,7 @@ CIT_TEST_DESKTOP=1 npm run test:gui
 
 `test:all` includes actual Docker desktops and command execution plus the production Eve runtime. Build both Docker images and the application first. Tests run serially to limit peak disk usage. For browser tests, set `CIT_CHROMIUM_PATH` to your Chromium executable or use `npx playwright install chromium` and leave it unset. See [verification](docs/verification.md) for the test boundaries.
 
-On **October 7, 2026**, the full suite passed **81 of 81 tests with no skips**, using production Eve, actual Docker desktops/commands and a deterministic local provider. The desktop-enabled GUI suite passed **3 of 3 tests**, including real noVNC authentication and keyboard input. Type checking, the production build and formatting checks also passed. See the verification guide for the measured scope and remaining workstation checks.
+On **October 7, 2026**, the full suite passed **105 of 105 tests with no skips**, using production Eve, actual Docker desktops/commands and a deterministic local provider. The desktop-enabled GUI suite passed **3 of 3 tests**, including real noVNC authentication and keyboard input. Type checking, the production build and formatting checks also passed. See the verification guide for the measured scope and remaining workstation checks.
 
 ## Read more
 

@@ -1,7 +1,7 @@
 /** Screenshots use a disposable, explicitly labeled test fixture, never default user data. */
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
@@ -31,6 +31,11 @@ let app: Awaited<ReturnType<typeof createApp>>;
 let fake: Awaited<ReturnType<typeof createFakeModel>>;
 let session: Session;
 let task: Task;
+const binaryFileName = "calculator-result.bin";
+const binaryFileBytes = Buffer.concat([
+  Buffer.from("Coding worker binary download fixture\n", "utf8"),
+  Buffer.from([0, 1, 255, 128, 42]),
+]);
 
 test.use({
   actionTimeout: 15_000,
@@ -53,6 +58,20 @@ async function freePort() {
     throw new Error("Failed to reserve fixture port");
   await new Promise<void>((resolve) => server.close(() => resolve()));
   return address.port;
+}
+
+async function expectDotConversationReady(page: Page) {
+  const userMessages = page.getByRole("main").locator(".message-user");
+  await expect(userMessages).toHaveCount(2);
+  await expect(userMessages.nth(0)).toContainText(
+    "The calculator adds numbers incorrectly.",
+  );
+  await expect(userMessages.nth(1)).toContainText(
+    `Please send me calculator-review.md and ${binaryFileName} from your worker.`,
+  );
+  await expect(
+    page.getByRole("main").getByText("Loading message…", { exact: true }),
+  ).toHaveCount(0);
 }
 
 test.beforeAll(async () => {
@@ -127,11 +146,11 @@ test.beforeAll(async () => {
   );
   expect(canonicalResponse.ok).toBe(true);
   session = (await canonicalResponse.json()) as Session;
-  task = await api<Task>("/tasks", {
+  const coordinator = await api<Task>("/tasks", {
     sessionId: session.id,
     title: "Fix addition and verify tests",
     prompt: "Fix the addition function and run the calculator tests.",
-    role: "coder",
+    role: "coordinator",
     projectId: project.id,
     modelProfileId: profile.id,
   });
@@ -140,9 +159,25 @@ test.beforeAll(async () => {
     role: "user",
     content:
       "The calculator adds numbers incorrectly. Can you fix it, run the tests, and show me the changes?",
-    taskId: task.id,
+    taskId: coordinator.id,
     kind: "chat",
   });
+  broker.store.update("tasks", coordinator.id, { status: "running" });
+  const delegated = await broker.executeTool({
+    taskId: coordinator.id,
+    callId: "gui-delegate-calculator",
+    toolName: "delegate",
+    input: {
+      role: "coder",
+      prompt: "Fix the addition function and prepare the isolated diff.",
+      title: "Fix addition and verify tests",
+      wait: false,
+    },
+  });
+  task = broker.store.require<Task>(
+    "tasks",
+    (delegated as { childTaskId: string }).childTaskId,
+  );
   broker.store.update("tasks", task.id, { status: "running" });
   // Actual file tools produce the patch and operation records shown in the UI.
   await broker.executeTool({
@@ -175,23 +210,75 @@ test.beforeAll(async () => {
     tokenUsage: 1232,
     toolCount: 3,
   });
+  broker.store.addMessage(task.sessionId, {
+    id: randomUUID(),
+    role: "assistant",
+    content:
+      "The coding worker prepared this implementation in the isolated workspace.\n\n```js\nexport const add = (a, b) => a + b;\n```",
+    taskId: task.id,
+    kind: "result",
+  });
+  broker.store.update("tasks", coordinator.id, { status: "completed" });
   broker.store.addMessage(session.id, {
     id: randomUUID(),
     role: "assistant",
     content:
-      "The addition function now uses `+` instead of `−`.\n\n```js\nexport const add = (a, b) => a + b;\n```\n\nThe change is prepared in an isolated workspace. Open the coding workspace to inspect the diff before applying it.",
-    taskId: task.id,
+      "The addition function now uses addition. My coding worker prepared the change in its workspace. You can inspect the diff before applying it.",
+    taskId: coordinator.id,
     kind: "result",
   });
-  await api(
-    "/dots/dot-primary/computer/file",
-    {
+  const requested = broker.addUserMessage(session.id, {
+    content: `Please send me calculator-review.md and ${binaryFileName} from your worker.`,
+  });
+  broker.store.update("tasks", requested.task.id, { status: "running" });
+  const fileDelegation = await broker.executeTool({
+    taskId: requested.task.id,
+    callId: "gui-delegate-files",
+    toolName: "delegate",
+    input: {
+      role: "coder",
+      prompt:
+        "Prepare the requested calculator review and binary result files.",
+      title: "Prepare calculator output files",
+      wait: false,
+    },
+  });
+  const fileWorker = broker.store.require<Task>(
+    "tasks",
+    (fileDelegation as { childTaskId: string }).childTaskId,
+  );
+  broker.store.update("tasks", fileWorker.id, { status: "running" });
+  await broker.executeTool({
+    taskId: fileWorker.id,
+    callId: "gui-write-review-file",
+    toolName: "write_file",
+    input: {
       path: "calculator-review.md",
       content:
         "# Calculator review\n\nThe addition function now uses +. Review the isolated coding diff before applying it.\n",
     },
-    "PUT",
-  );
+  });
+  const fileWorkspace = broker.store.require<Task>(
+    "tasks",
+    fileWorker.id,
+  ).workspace!;
+  expect(fileWorkspace.scope).toBe("computer");
+  await writeFile(join(fileWorkspace.root, binaryFileName), binaryFileBytes);
+  broker.store.update("tasks", fileWorker.id, { status: "completed" });
+  for (const path of ["calculator-review.md", binaryFileName]) {
+    const forwarded = await broker.executeTool({
+      taskId: requested.task.id,
+      callId: `gui-forward-${path}`,
+      toolName: "forward_file",
+      input: {
+        sourceTaskId: fileWorker.id,
+        requestMessageId: requested.message.id,
+        path,
+      },
+    });
+    expect(forwarded.result).toMatchObject({ file: { name: path } });
+  }
+  broker.store.update("tasks", requested.task.id, { status: "completed" });
   await api("/settings", { paused: true }, "PATCH");
   await api("/goals", {
     title: "Morning project check",
@@ -299,13 +386,37 @@ test("actual GUI renders chat, coding changes, goals, mobile layout, and visible
     "The addition function now uses",
   );
   await expect(
+    page.locator(".message-assistant pre, .message-assistant code"),
+  ).toHaveCount(0);
+  await expect(page.getByRole("main")).not.toContainText("export const add");
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page
+      .getByRole("main")
+      .getByRole("link", { name: /Download calculator-result\.bin/ })
+      .click(),
+  ]);
+  expect(download.suggestedFilename()).toBe(binaryFileName);
+  const downloadedPath = await download.path();
+  expect(downloadedPath).not.toBeNull();
+  expect(await readFile(downloadedPath!)).toEqual(binaryFileBytes);
+  await expect(
     page.getByRole("navigation").getByRole("link", { name: "Models" }),
   ).toBeVisible();
+  await expectDotConversationReady(page);
   await page.screenshot({
     path: join(screenshotsDir, "chat.png"),
     fullPage: true,
     animations: "disabled",
   });
+
+  await page.goto(`${webUrl}/sessions/${task.sessionId}`);
+  await expect(page.getByRole("main")).toContainText(
+    "The coding worker prepared this implementation",
+  );
+  await expect(page.getByRole("main").locator("pre")).toContainText(
+    "export const add",
+  );
 
   await page.goto(`${webUrl}/tasks/${task.id}`);
   await page.getByRole("button", { name: "Changes", exact: true }).click();
@@ -435,6 +546,7 @@ test("actual GUI renders chat, coding changes, goals, mobile layout, and visible
     () => document.documentElement.scrollWidth > window.innerWidth,
   );
   expect(overflow).toBe(false);
+  await expectDotConversationReady(page);
   await page.screenshot({
     path: join(screenshotsDir, "mobile.png"),
     fullPage: true,
@@ -553,12 +665,40 @@ test("Chat and Work create independent sessions without a Dot identity", async (
   const work = broker.store.require<Session>("sessions", workId);
   expect(work.dotId).toBeNull();
   expect(work.kind).toBe("work");
-  expect(
-    broker.store.list<Task>("tasks", {
-      predicate: (item) => item.sessionId === workId,
-    })[0].role,
-  ).toBe("coder");
+  const workTask = broker.store.list<Task>("tasks", {
+    predicate: (item) => item.sessionId === workId,
+  })[0];
+  expect(workTask.role).toBe("coder");
   await expect(page.locator(".dot-identity-card")).toHaveCount(0);
+  broker.updateSettings({ paused: false });
+  broker.store.update("tasks", workTask.id, { status: "running" });
+  const implementation = "export const standalone_work_marker = 7;\n";
+  await broker.executeTool({
+    taskId: workTask.id,
+    callId: "gui-independent-write",
+    toolName: "write_file",
+    input: { path: "standalone-result.mjs", content: implementation },
+  });
+  broker.store.update("tasks", workTask.id, {
+    status: "completed",
+    result: "Prepared standalone-result.mjs in the independent workspace.",
+  });
+  broker.store.addMessage(workId, {
+    role: "assistant",
+    content: `Prepared the implementation in standalone-result.mjs.\n\n\`\`\`js\n${implementation}\`\`\``,
+    taskId: workTask.id,
+    kind: "result",
+  });
+  broker.updateSettings({ paused: true });
+  await page.reload();
+  await expect(page.getByRole("main").locator("pre")).toContainText(
+    "standalone_work_marker",
+  );
+  await page.screenshot({
+    path: join(screenshotsDir, "independent-work-result.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
 });
 
 test("Dots can be personalized and selected while their real computer files remain separate", async ({
@@ -696,6 +836,7 @@ test("Dots can be personalized and selected while their real computer files rema
   await expect(page.locator(".identity-computer")).toContainText(
     "Desktop stopped",
   );
+  await expectDotConversationReady(page);
   await page.screenshot({
     path: join(screenshotsDir, "pet-chat.png"),
     fullPage: true,
@@ -707,9 +848,41 @@ test("Dots can be personalized and selected while their real computer files rema
   );
   await page.getByRole("button", { name: "Desktop", exact: true }).click();
   if (process.env.CIT_TEST_DESKTOP === "1") {
-    await page
-      .getByRole("button", { name: "Start desktop", exact: true })
-      .click();
+    await expect(
+      page.getByRole("button", { name: "Desktop", exact: true }),
+    ).toHaveClass(/is-active/);
+    const startButton = page.getByRole("button", {
+      name: "Start desktop",
+      exact: true,
+    });
+    await expect(startButton).toBeEnabled();
+    const startPath = "/api/local/dots/dot-primary/computer/start";
+    const [startRequest, startResponse] = await Promise.all([
+      page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          new URL(request.url()).pathname === startPath,
+        { timeout: 15_000 },
+      ),
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === startPath,
+        { timeout: 120_000 },
+      ),
+      startButton.click(),
+    ]);
+    expect(startRequest.postDataJSON()).toEqual({});
+    const startResult = await startResponse.json();
+    expect(startResponse.status(), JSON.stringify(startResult)).toBe(200);
+    expect(startResult.desktop.state, startResult.desktop.error).toBe(
+      "running",
+    );
+    expect(startResult.desktop.url).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    await expect(page.locator(".computer-controls .tag")).toHaveText(
+      "running",
+      { timeout: 15_000 },
+    );
     await expect(
       page.getByTitle("Pip Scholar's Ubuntu desktop", { exact: true }),
     ).toBeVisible({ timeout: 120_000 });
@@ -805,9 +978,13 @@ test("Dots can be personalized and selected while their real computer files rema
       "The addition function now uses",
     );
     await expect(page.locator(".identity-computer")).toContainText("Connected");
-    await expect(page.locator(".identity-output-files")).toContainText(
+    await expect(page.locator(".identity-output-files")).not.toContainText(
       "browser-keyboard-check.txt",
     );
+    await expect(page.locator(".identity-output-files")).toContainText(
+      binaryFileName,
+    );
+    await expectDotConversationReady(page);
     await page.screenshot({
       path: join(screenshotsDir, "pet-chat.png"),
       fullPage: true,

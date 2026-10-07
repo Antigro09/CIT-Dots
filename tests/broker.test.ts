@@ -307,6 +307,9 @@ async function fixture() {
   const createTask = (prompt: string, fields: Partial<Task> = {}) =>
     request<Task>("/tasks", {
       prompt,
+      // These cases exercise worker tools directly; the Dot coordinator is
+      // covered separately and delegates filesystem work to this role.
+      role: "coder",
       modelProfileId: model.id,
       projectId: project.id,
       ...fields,
@@ -361,6 +364,8 @@ test("real SQLite + model proxy: chat is persisted, streamed, and survives reope
   const f = await fixture();
   try {
     const session = await f.request<Session>("/sessions", {
+      kind: "chat",
+      dotId: null,
       title: "Persistent chat",
       modelProfileId: f.model.id,
     });

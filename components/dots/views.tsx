@@ -52,6 +52,8 @@ import type {
 } from "@/src/shared/types";
 import { Status, TaskCard } from "./console";
 import { PetAvatar } from "./pet";
+import { MessageFiles } from "./message-files";
+import { dotProse } from "@/src/shared/dot-output";
 import { activeDot, ownerId } from "./identity";
 import type { WorkspaceDiff } from "@/src/server/workspaces";
 import {
@@ -118,9 +120,15 @@ export function ChatView({
   const keepBottom = useRef(true);
   const fileInput = useRef<HTMLInputElement>(null);
   const messages = detail.data?.messages ?? [];
+  const isDotConversation = Boolean(dot && sessionId === dot.sessionId);
   const sessionTasks = snapshot.tasks.filter(
     (task) => task.sessionId === sessionId,
   );
+  const assistantName = isDotConversation
+    ? dot!.name
+    : dot
+      ? `${sessionTasks[0]?.role || "Specialist"} worker`
+      : "Assistant";
   const active = sessionTasks.filter(
     (task) =>
       !["completed", "failed", "canceled", "interrupted"].includes(task.status),
@@ -309,24 +317,28 @@ export function ChatView({
               >
                 {message.role !== "user" ? (
                   <span
-                    className={`assistant-avatar ${dot ? "pet-message-avatar" : ""}`}
-                    aria-label={dot?.name ?? "CIT Dots"}
+                    className={`assistant-avatar ${isDotConversation ? "pet-message-avatar" : ""}`}
+                    aria-label={assistantName}
                   >
-                    {dot ? <PetAvatar dot={dot} /> : "✦"}
+                    {isDotConversation ? <PetAvatar dot={dot!} /> : "✦"}
                   </span>
                 ) : null}
                 <div className="message-body">
                   {message.role !== "user" ? (
                     <div className="message-author">
-                      {message.role === "tool"
-                        ? "Tool result"
-                        : (dot?.name ?? "Assistant")}
+                      {message.role === "tool" ? "Tool result" : assistantName}
                       {message.kind && message.kind !== "chat" ? (
                         <span className="message-kind">{message.kind}</span>
                       ) : null}
                     </div>
                   ) : null}
-                  <Markdown content={message.content} />
+                  {isDotConversation && message.role !== "user" ? (
+                    <p style={{ whiteSpace: "pre-wrap" }}>
+                      {dotProse(message.content)}
+                    </p>
+                  ) : (
+                    <Markdown content={message.content} />
+                  )}
                   {message.attachments?.length ? (
                     <div className="attachment-list">
                       {message.attachments.map((attachment, index) => (
@@ -339,6 +351,9 @@ export function ChatView({
                         </span>
                       ))}
                     </div>
+                  ) : null}
+                  {message.files?.length ? (
+                    <MessageFiles files={message.files} />
                   ) : null}
                 </div>
               </article>
@@ -2115,7 +2130,13 @@ export function TaskView({
             {task.result ? (
               <div className="task-result">
                 <h3>Result</h3>
-                <Markdown content={task.result} />
+                {ownerId(task) !== null && task.role === "coordinator" ? (
+                  <p style={{ whiteSpace: "pre-wrap" }}>
+                    {dotProse(task.result)}
+                  </p>
+                ) : (
+                  <Markdown content={task.result} />
+                )}
               </div>
             ) : null}
             {task.error ? (

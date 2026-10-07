@@ -1,8 +1,10 @@
 import {
   Client,
+  ClientError,
   type InputResponse,
   type MessageStreamEvent,
 } from "eve/client";
+import { setTimeout as delay } from "node:timers/promises";
 import { config, internalToken } from "./config";
 
 export interface WorkerEvent {
@@ -13,6 +15,11 @@ export interface WorkerEvent {
   result?: unknown;
   usage?: { inputTokens: number; outputTokens: number };
   cursor?: number;
+  deliveryIds?: string[];
+  turnId?: string;
+}
+export interface WorkerMessageReceipt {
+  deliveryId: string;
 }
 function client(taskId: string): Client {
   return new Client({
@@ -30,10 +37,53 @@ export async function sendWorkerMessage(
   sessionId: string,
   taskId: string,
   message: string,
-): Promise<void> {
-  await client(taskId)
-    .sessions.attach(sessionId)
-    .send(message, { turnPolicy: "queue" });
+  mode: "steer" | "queue" = "queue",
+): Promise<WorkerMessageReceipt | void> {
+  const worker = client(taskId);
+  const deadline = Date.now() + 20_000;
+  let retryDelay = 250;
+  for (;;) {
+    // The public raw fetch preserves Client's broker authentication and headers.
+    // Its acceptance identity lets the broker track folded or steered deliveries
+    // through the authoritative stream, instead of guessing a turn count.
+    const response = await worker.fetch(
+      `/eve/v1/session/${encodeURIComponent(sessionId)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message, turnPolicy: mode }),
+      },
+    );
+    if (!response.ok) {
+      const error = new ClientError(
+        response.status,
+        await response.text(),
+        response.headers,
+      );
+      if (
+        error.status !== 409 ||
+        error.code !== "session_not_ready" ||
+        Date.now() >= deadline
+      )
+        throw error;
+      await delay(Math.min(retryDelay, Math.max(0, deadline - Date.now())));
+      retryDelay = Math.min(retryDelay * 2, 2000);
+      continue;
+    }
+    const accepted = (await response.json()) as {
+      sessionId?: unknown;
+      deliveryId?: unknown;
+    };
+    if (
+      accepted.sessionId !== sessionId ||
+      typeof accepted.deliveryId !== "string" ||
+      !accepted.deliveryId
+    )
+      throw new Error(
+        "Worker did not return a valid accepted delivery identity.",
+      );
+    return { deliveryId: accepted.deliveryId };
+  }
 }
 export async function cancelWorkerSession(
   sessionId: string,
@@ -114,6 +164,14 @@ export async function* streamWorkerSession(
     yield {
       ...(projected ?? { type: "tool", result: { event: event.type } }),
       cursor,
+      ...(event.meta.deliveryIds
+        ? { deliveryIds: [...event.meta.deliveryIds] }
+        : {}),
+      ...(event.data &&
+      "turnId" in event.data &&
+      typeof event.data.turnId === "string"
+        ? { turnId: event.data.turnId }
+        : {}),
     };
     if (projected?.type === "completed" || projected?.type === "failed") return;
   }

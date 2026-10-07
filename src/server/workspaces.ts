@@ -391,6 +391,34 @@ export async function readFile(
   );
 }
 
+/** Read a bounded binary artifact without following workspace symlinks. */
+export async function readArtifact(
+  workspace: Workspace,
+  relative: string,
+): Promise<Buffer> {
+  assertRelative(relative);
+  return withWorkspaceLock(
+    workspace.computerRoot ?? workspace.root,
+    async () => {
+      const handle = await fs.open(
+        await safePath(workspace.root, relative),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.size > 8 * 1024 * 1024)
+          throw new Error("File sharing accepts regular files up to 8 MiB.");
+        const bytes = await handle.readFile();
+        if (bytes.length > 8 * 1024 * 1024)
+          throw new Error("File sharing accepts regular files up to 8 MiB.");
+        return bytes;
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+}
+
 export async function writeFile(
   workspace: Workspace,
   relative: string,

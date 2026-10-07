@@ -169,6 +169,18 @@ export function createApp(
   app.get("/api/local/dots/:id/session", (request) =>
     broker.dotSession(pathId(request)),
   );
+  app.get("/api/local/files/:id", (request, reply) => {
+    const { file, bytes } = broker.sharedFile(pathId(request));
+    return reply
+      .header("content-type", "application/octet-stream")
+      .header(
+        "content-disposition",
+        `attachment; filename*=UTF-8''${encodeURIComponent(file.name).replace(/'/g, "%27")}`,
+      )
+      .header("x-content-type-options", "nosniff")
+      .header("cache-control", "no-store")
+      .send(bytes);
+  });
   app.get("/api/local/dots/:id/computer", (request) =>
     broker.computerStatus(pathId(request)),
   );
@@ -285,13 +297,15 @@ export function createApp(
     return {
       session: broker.store.require<Session>("sessions", id),
       messages: broker.store.messages(id),
-      tasks: broker.store.list<Task>("tasks", {
-        predicate: (t) => t.sessionId === id,
-      }),
+      tasks: broker.store
+        .list<Task>("tasks", {
+          predicate: (t) => t.sessionId === id,
+        })
+        .map((task) => broker.publicTask(task)),
     };
   });
-  app.post("/api/local/sessions/:id/messages", (request) =>
-    broker.addUserMessage(
+  app.post("/api/local/sessions/:id/messages", async (request) => {
+    const output = await broker.addWorkerSessionMessage(
       pathId(request),
       z
         .object({
@@ -308,8 +322,9 @@ export function createApp(
             .optional(),
         })
         .parse(request.body),
-    ),
-  );
+    );
+    return { ...output, task: broker.publicTask(output.task) };
+  });
   app.post("/api/local/tasks", (request) =>
     broker.createTask(
       z
@@ -330,30 +345,22 @@ export function createApp(
   app.get("/api/local/tasks/:id", (request) => {
     const id = pathId(request);
     return {
-      task: broker.store.require<Task>("tasks", id),
-      children: broker.store.list<Task>("tasks", {
-        predicate: (t) => t.parentId === id,
-      }),
+      task: broker.publicTask(broker.store.require<Task>("tasks", id)),
+      children: broker.store
+        .list<Task>("tasks", {
+          predicate: (t) => t.parentId === id,
+        })
+        .map((task) => broker.publicTask(task)),
       operations: broker.store.list<ToolOperation>("tool_operations", {
         predicate: (op) => op.taskId === id,
       }),
     };
   });
-  app.post("/api/local/tasks/:id/cancel", (request) =>
-    broker.cancelTask(pathId(request)),
+  app.post("/api/local/tasks/:id/cancel", async (request) =>
+    broker.publicTask(await broker.cancelTask(pathId(request))),
   );
   app.post("/api/local/tasks/:id/retry", (request) => {
-    const task = broker.store.require<Task>("tasks", pathId(request));
-    if (!["failed", "canceled", "interrupted"].includes(task.status))
-      throw new Error("Only stopped tasks can be retried.");
-    return broker.createTask({
-      sessionId: task.sessionId,
-      prompt: task.prompt,
-      role: task.role,
-      projectId: task.projectId,
-      modelProfileId: task.modelProfileId,
-      title: task.title,
-    });
+    return broker.publicTask(broker.retryTask(pathId(request)));
   });
   app.get("/api/local/tasks/:id/diff", (request) =>
     broker.taskDiff(pathId(request)),

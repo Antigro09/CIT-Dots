@@ -61,13 +61,19 @@ export async function runBrokerTool(
       : undefined;
   const childTaskId = initial.childTaskId ?? cachedResult?.childTaskId;
   if (childTaskId) {
+    if (input.wait === false) return { childTaskId, status: "queued" };
     for (;;) {
       if (ctx.abortSignal.aborted) return { canceled: true };
       const child = await readChild(ctx, childTaskId);
       if (child.status === "completed")
-        return child.result ?? "Child completed.";
+        return {
+          childTaskId,
+          status: child.status,
+          result: child.result ?? "Child completed.",
+        };
       if (["failed", "canceled", "interrupted"].includes(child.status))
         return {
+          childTaskId,
           status: child.status,
           error: child.error ?? "Child did not complete.",
         };

@@ -96,6 +96,18 @@ export function fixtureReply(request: CompletionRequest): FakeReply {
     tool: { name: toolName(request, name), input },
   });
 
+  if (currentScenario === "coordinator") {
+    if (!done("delegate"))
+      return tool("delegate", {
+        role: "coder",
+        title: "Implement and verify calculator change",
+        prompt:
+          "fixture:coding Fix the calculator, run its test, and delegate a review.",
+      });
+    return {
+      text: "My coding worker fixed the calculator. Its project test passed, and a reviewer checked the change. The source remains in the worker's workspace.",
+    };
+  }
   if (currentScenario === "coding") {
     if (!done("read_file"))
       return tool("read_file", { path: "calculator.mjs" });
