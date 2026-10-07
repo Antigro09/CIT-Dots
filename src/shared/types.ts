@@ -10,6 +10,17 @@ export interface BaseRecord {
   version?: number;
 }
 
+export const PRIMARY_DOT_ID = "dot-primary";
+export type DotAvatarKind = "blob" | "cat" | "dog" | "robot";
+export interface Dot extends BaseRecord {
+  sessionId?: string;
+  name: string;
+  personality: string;
+  avatar: { kind: DotAvatarKind; color: string };
+  isPrimary: boolean;
+  modelProfileId: string | null;
+}
+
 export type ModelProvider = "ollama" | "lmstudio";
 export interface ModelProfile extends BaseRecord {
   name: string;
@@ -31,7 +42,10 @@ export interface Project extends BaseRecord {
   isGit: boolean;
 }
 
+export type SessionKind = "dot" | "chat" | "work";
 export interface Session extends BaseRecord {
+  kind?: SessionKind;
+  dotId?: string | null;
   title: string;
   projectId: string | null;
   modelProfileId: string | null;
@@ -63,6 +77,7 @@ export type TaskStatus =
   | "canceled"
   | "interrupted";
 export interface Task extends BaseRecord {
+  dotId?: string | null;
   sessionId: string;
   parentId: string | null;
   rootId: string;
@@ -94,6 +109,7 @@ export interface Task extends BaseRecord {
 
 export type ScheduleType = "once" | "interval" | "cron";
 export interface Goal extends BaseRecord {
+  dotId?: string | null;
   title: string;
   objective: string;
   sessionId: string;
@@ -111,6 +127,7 @@ export interface Goal extends BaseRecord {
 }
 
 export interface Memory extends BaseRecord {
+  dotId?: string | null;
   title: string;
   content: string;
   source?: string;
@@ -128,6 +145,7 @@ export interface Approval extends BaseRecord {
 }
 
 export interface InboxItem extends BaseRecord {
+  dotId?: string | null;
   sessionId: string;
   taskId?: string;
   messageId?: string;
@@ -148,6 +166,8 @@ export interface Event {
 }
 
 export interface Settings {
+  selectedDotId?: string;
+  desktopImage?: string;
   paused: boolean;
   defaultModelProfileId: string | null;
   roleModelProfileIds?: Partial<Record<TaskRole, string | null>>;
@@ -186,6 +206,7 @@ export interface Health {
 }
 
 export interface Snapshot {
+  dots: Dot[];
   sessions: Session[];
   models: ModelProfile[];
   projects: Project[];

@@ -8,6 +8,10 @@ CIT-Dots is a self-hosted assistant for one Ubuntu workstation. Its local web in
 flowchart LR
   Browser[Next.js chat and task interface] --> Broker[Local application broker]
   Broker --> Store[(SQLite application state)]
+  Broker --> Dots[Persistent Dot identities]
+  Dots --> Computers[Ubuntu/Xfce Docker desktops]
+  Computers --> DotFiles[(Per-Dot home, workspace, artifacts)]
+  Browser --> Computers
   Broker --> Eve[Eve agent runtime]
   Eve --> Models[Ollama or LM Studio local model endpoint]
   Eve --> Children[Specialist sub-agents and sub-sessions]
@@ -23,6 +27,24 @@ The broker owns application records, task dispatch, dynamic child lineage, share
 
 Do not run the broker, Eve or the GUI server from a short-lived shell for daily use. The supplied user systemd services are the workstation's process manager. Closing the GUI leaves those services running. Running after logout or reboot requires the explicit systemd linger setup described in the runbook.
 
+## Persistent Dots and graphical computers
+
+Each Dot has a durable ID, name, personality, pet appearance and default model profile. Pip is created as the primary Dot and cannot be removed or lose primary status. Extra Dots can be created and removed. These are CIT Dots product choices; [the research note](dots-research.md) distinguishes them from documented ChatGPT behavior.
+
+Dot sessions, tasks, goals, memories and inbox items belong to their Dot. Worker children inherit the parent task's owner; delegation does not grant access to another Dot's records or files. Models and registered projects remain shared. A Dot identity persists independently of its current tasks, sub-sessions or desktop process.
+
+Standalone chat and work sessions have explicit null Dot ownership. The upper-right New chat action opens an empty conversation with Chat and Work modes. Legacy records without an ownership field migrate to the primary Dot; explicit null remains independent through migration and restart. Independent chat receives general context and its conversation history without private Dot memory or computer access. Independent work uses its approved project workspace. Deleting an extra Dot retains independent sessions.
+
+Each Dot has one stable main conversation. Temporary child/worker sessions retain their own execution history, while meaningful progress, results and questions from child workers and scheduled work also reach the Dot's main conversation and durable inbox. The user can follow that Dot's ongoing work in one conversation.
+
+Each Dot owns `.cit-data/dots/<dotId>/computer/{home,workspace,artifacts}`. Its Ubuntu 26.04/Xfce desktop is real, streamed with TigerVNC/noVNC for interactive browser, terminal and file-manager use. File and command tools use the trusted Dot's computer storage. Project tasks retain isolated project clones and explicit diff/apply semantics. Agent command operations for one Dot are serialized; separate Dots receive separate mounts.
+
+Commands can run inside a live Dot desktop and inherit its display session to launch graphical applications. The agent tool set does not include automated screenshot, mouse or keyboard operations. Interactive desktop access and command execution are distinct from a vision model controlling the screen.
+
+The desktop image supplies the OS and applications. Owned computer files persist, while temporary runtime directories can be recreated. A desktop can be stopped without deleting its Dot, and closing the GUI does not stop its work. Removing an extra Dot stops its work and desktop before deleting only its owned state, leaving original source projects intact.
+
+The isolation boundary is a Docker container sharing the host kernel, not a VM. Each desktop has its own private internal network with no outbound internet, a non-root guest user, resource limits and no host Docker socket or GPU devices. A broker-managed display relay listens only on loopback and connects to the validated owned container's internal noVNC address; this avoids widening guest networking to publish the display. Host lifecycle metadata and connection credentials sit outside the shared computer storage; the desktop receives a dedicated read-only authentication-secret mount. The broker returns the connection URL to the local GUI and does not automatically place the URL/password in model context or logs. Guest code can read its own VNC authentication files. Network approval for an exact agent command does not enable internet access in the graphical browser.
+
 ## How autonomy works
 
 An always-running process does not need to spend GPU time continuously. Accepted tasks and meaningful events trigger agent runs. A task can delegate research, implementation or review to specialist sub-agents, retain its session and produce a result later. Child agents share the same model server through bounded request concurrency; each child does not need its own model copy.
@@ -35,7 +57,7 @@ A model profile identifies a provider endpoint and model ID. The application che
 
 Keep one selected model profile on each task or session. A change to the default model should affect future work; an in-progress turn should not silently switch model or template. Model loading and unloading belong to the inference service. Loading a large model may take time and consume memory needed by existing runs.
 
-Memories are explicit SQLite records. The broker supplies bounded saved context and recent conversation history to each worker step. Editing or deleting a memory changes subsequent context construction; it does not delete the original conversation. This release uses local text retrieval without an embedding service. Model context limits remain separate from persisted history.
+Memories are explicit SQLite records. Dot context includes only that Dot's bounded saved memories and the relevant conversation history; standalone sessions use their independent general context. Editing or deleting a memory changes subsequent context construction; it does not delete the original conversation. This release uses local text retrieval without an embedding service. Model context limits remain separate from persisted history.
 
 ## Coding execution
 
@@ -63,7 +85,7 @@ Features in the later stages must be treated as unverified until their acceptanc
 
 ## Persistence and recovery boundary
 
-Preserve both application data and `.eve/.workflow-data`, plus the coding workspace files. A process restart can recover stored application records; recovery of an unfinished workflow also depends on the installed Eve release and compatible authored workflow code. A saved task is not evidence that every interrupted shell command can safely replay.
+Preserve both application data and `.eve/.workflow-data`, including Dot and standalone-session records, computer directories, `computer-state` task metadata and coding workspace files. Stop graphical desktops as well as application writers before taking an offline snapshot. Desktop authentication and lifecycle metadata are excluded; new credentials are generated when restored computers start. A process restart can recover stored application records; recovery of an unfinished workflow also depends on the installed Eve release and compatible authored workflow code. A saved task is not evidence that every interrupted shell command can safely replay.
 
 Backups are private because they can contain chat text, source code and task artifacts. Runtime credentials remain in local environment files and are excluded from the normal backup. Reconfigure those credentials separately after restore.
 

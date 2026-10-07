@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { access } from "node:fs/promises";
 import { resolve } from "node:path";
+import { ownedDesktopFilters } from "./desktop-ownership.mjs";
 import {
   controlUrl,
   dataDir,
@@ -28,6 +29,7 @@ for (const [label, command, args] of [
 }
 for (const path of [
   resolve(dataDir(), "cit.sqlite"),
+  resolve(dataDir(), "dots"),
   resolve(projectRoot, ".eve/.workflow-data"),
 ]) {
   await access(path).then(
@@ -35,6 +37,24 @@ for (const path of [
     () => console.log(`State path not created yet: ${path}`),
   );
 }
+const desktopResult = spawnSync(
+  "docker",
+  [
+    "ps",
+    "--all",
+    ...ownedDesktopFilters(dataDir()),
+    "--format",
+    '{{.Label "cit-dots.dot"}}: {{.Status}}',
+  ],
+  { encoding: "utf8", timeout: 8_000 },
+);
+console.log(
+  `Owned graphical computers: ${
+    desktopResult.status === 0
+      ? desktopResult.stdout.trim() || "none"
+      : "Docker unavailable or inaccessible"
+  }`,
+);
 try {
   const response = await fetch(new URL("/api/local/snapshot", controlUrl()), {
     headers: { Authorization: `Bearer ${await internalToken()}` },

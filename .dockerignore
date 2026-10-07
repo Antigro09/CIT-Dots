@@ -1,0 +1,11 @@
+node_modules
+.git
+.cit-data
+.eve
+.next
+.output
+.nitro
+.env*
+artifacts
+test-results
+playwright-report

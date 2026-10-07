@@ -43,6 +43,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  Dot,
   Goal,
   Memory,
   ModelProfile,
@@ -50,6 +51,8 @@ import type {
   Task,
 } from "@/src/shared/types";
 import { Status, TaskCard } from "./console";
+import { PetAvatar } from "./pet";
+import { activeDot, ownerId } from "./identity";
 import type { WorkspaceDiff } from "@/src/server/workspaces";
 import {
   localApi,
@@ -71,21 +74,37 @@ export function ChatView({
   snapshot,
   sessionId,
   selectTask,
-}: ViewProps & { sessionId?: string; selectTask: (id: string) => void }) {
+  dot,
+  kind = "chat",
+}: ViewProps & {
+  sessionId?: string;
+  selectTask: (id: string) => void;
+  dot?: Dot;
+  kind?: "chat" | "work";
+}) {
   const router = useRouter();
   const detail = useDetail<SessionDetail>(
     sessionId ? `/sessions/${sessionId}` : null,
     snapshot.eventsCursor,
   );
   const [content, setContent] = useState("");
-  const [model, setModel] = useState(
-    snapshot.sessions.find((session) => session.id === sessionId)
-      ?.modelProfileId ??
-      snapshot.settings.roleModelProfileIds?.coordinator ??
-      snapshot.settings.defaultModelProfileId ??
-      snapshot.models[0]?.id ??
-      "",
-  );
+  const [mode, setMode] = useState<"chat" | "work">(kind);
+  const [modelOverride, setModelOverride] = useState<string | null>(null);
+  const sessionModel = snapshot.sessions.find(
+    (session) => session.id === sessionId,
+  )?.modelProfileId;
+  const roleModel =
+    snapshot.settings.roleModelProfileIds?.[
+      mode === "work" ? "coder" : "coordinator"
+    ];
+  const model =
+    modelOverride ??
+    (dot
+      ? (dot.modelProfileId ?? roleModel ?? sessionModel)
+      : (sessionModel ?? roleModel)) ??
+    snapshot.settings.defaultModelProfileId ??
+    snapshot.models[0]?.id ??
+    "";
   const [project, setProject] = useState(
     snapshot.sessions.find((session) => session.id === sessionId)?.projectId ??
       "",
@@ -116,7 +135,13 @@ export function ChatView({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!content.trim() || !model || state.busy) return;
+    if (
+      !content.trim() ||
+      !model ||
+      state.busy ||
+      (!dot && mode === "work" && !project)
+    )
+      return;
     await state.run(async () => {
       let id = sessionId;
       if (!id) {
@@ -127,13 +152,15 @@ export function ChatView({
             "New conversation",
           projectId: project || null,
           modelProfileId: model,
+          kind: dot ? "dot" : mode,
+          dotId: dot?.id ?? null,
         });
         id = session.id;
       }
       await localApi(`/sessions/${id}/messages`, "POST", {
         content: content.trim(),
         attachments,
-        modelProfileId: model,
+        ...(!dot || modelOverride !== null ? { modelProfileId: model } : {}),
       });
       setContent("");
       setAttachments([]);
@@ -143,7 +170,39 @@ export function ChatView({
   }
 
   return (
-    <div className={`chat-view ${isEmpty ? "is-empty" : ""}`}>
+    <div
+      className={`chat-view ${isEmpty ? "is-empty" : ""} mode-${mode} ${dot ? "dot-chat" : "independent-chat"}`}
+    >
+      {!sessionId && !dot ? (
+        <div
+          className="session-mode-pill"
+          role="group"
+          aria-label="New session mode"
+        >
+          <button
+            className={mode === "chat" ? "is-active" : ""}
+            aria-pressed={mode === "chat"}
+            onClick={() => {
+              setMode("chat");
+              setModelOverride(null);
+            }}
+          >
+            <MessageSquare size={14} />
+            Chat
+          </button>
+          <button
+            className={mode === "work" ? "is-active" : ""}
+            aria-pressed={mode === "work"}
+            onClick={() => {
+              setMode("work");
+              setModelOverride(null);
+            }}
+          >
+            <Code2 size={14} />
+            Work
+          </button>
+        </div>
+      ) : null}
       <div
         className="chat-scroll"
         ref={scroller}
@@ -162,44 +221,60 @@ export function ChatView({
               <span className="mini-brand" aria-hidden="true">
                 ✦
               </span>{" "}
-              A little more room to think.
+              {dot
+                ? `${dot.name} is home.`
+                : mode === "work"
+                  ? "A place to build something useful."
+                  : "A little more room to think."}
             </div>
             <h1>
-              What shall we
-              <br />
-              work on?
+              {mode === "work" && !dot ? (
+                "What should we work on?"
+              ) : !dot ? (
+                "What's on your mind?"
+              ) : (
+                <>
+                  What shall we
+                  <br />
+                  work on?
+                </>
+              )}
             </h1>
             <p>
-              Your models. Your machine. An assistant that can
+              {dot
+                ? `${dot.name} has its own memory, personality, and computer. You can`
+                : "Your models. Your machine. An assistant that can"}
               <br className="desktop-break" /> chat, write code, and keep
               working in the background.
             </p>
-            <div className="welcome-actions">
-              <Link href="/projects" className="welcome-card">
-                <span className="welcome-card-icon">
-                  <Code2 size={20} />
-                </span>
-                <strong>Build something</strong>
-                <span>Give a coding agent a project</span>
-                <ArrowUpRight size={16} />
-              </Link>
-              <Link href="/goals" className="welcome-card">
-                <span className="welcome-card-icon">
-                  <CalendarClock size={20} />
-                </span>
-                <strong>Set a background goal</strong>
-                <span>Let work happen on a schedule</span>
-                <ArrowUpRight size={16} />
-              </Link>
-              <Link href="/models" className="welcome-card">
-                <span className="welcome-card-icon">
-                  <Cpu size={20} />
-                </span>
-                <strong>Connect a local model</strong>
-                <span>Ollama or LM Studio</span>
-                <ArrowUpRight size={16} />
-              </Link>
-            </div>
+            {dot ? (
+              <div className="welcome-actions">
+                <Link href="/projects" className="welcome-card">
+                  <span className="welcome-card-icon">
+                    <Code2 size={20} />
+                  </span>
+                  <strong>Build something</strong>
+                  <span>Give a coding agent a project</span>
+                  <ArrowUpRight size={16} />
+                </Link>
+                <Link href={`/dots/${dot.id}/goals`} className="welcome-card">
+                  <span className="welcome-card-icon">
+                    <CalendarClock size={20} />
+                  </span>
+                  <strong>Set a background goal</strong>
+                  <span>Let work happen on a schedule</span>
+                  <ArrowUpRight size={16} />
+                </Link>
+                <Link href="/models" className="welcome-card">
+                  <span className="welcome-card-icon">
+                    <Cpu size={20} />
+                  </span>
+                  <strong>Connect a local model</strong>
+                  <span>Ollama or LM Studio</span>
+                  <ArrowUpRight size={16} />
+                </Link>
+              </div>
+            ) : null}
             {snapshot.models.length === 0 ? (
               <div className="setup-note">
                 <span className="step-number">1</span>
@@ -233,14 +308,19 @@ export function ChatView({
                 key={message.id}
               >
                 {message.role !== "user" ? (
-                  <span className="assistant-avatar" aria-label="CIT Dots">
-                    ✦
+                  <span
+                    className={`assistant-avatar ${dot ? "pet-message-avatar" : ""}`}
+                    aria-label={dot?.name ?? "CIT Dots"}
+                  >
+                    {dot ? <PetAvatar dot={dot} /> : "✦"}
                   </span>
                 ) : null}
                 <div className="message-body">
                   {message.role !== "user" ? (
                     <div className="message-author">
-                      {message.role === "tool" ? "Tool result" : "Dots"}
+                      {message.role === "tool"
+                        ? "Tool result"
+                        : (dot?.name ?? "Assistant")}
                       {message.kind && message.kind !== "chat" ? (
                         <span className="message-kind">{message.kind}</span>
                       ) : null}
@@ -320,12 +400,18 @@ export function ChatView({
             onChange={(event) => setContent(event.target.value)}
             placeholder={
               snapshot.models.length
-                ? "Ask anything, or give Dots something to work on…"
+                ? dot
+                  ? `Message ${dot.name}, or give it something to work on…`
+                  : mode === "work"
+                    ? "Describe what you want to work on…"
+                    : "Ask anything…"
                 : "Connect a local model to start chatting…"
             }
             rows={3}
             disabled={
-              !snapshot.models.length || state.connection !== "connected"
+              state.busy ||
+              !snapshot.models.length ||
+              state.connection !== "connected"
             }
             onKeyDown={(event) => {
               if (
@@ -347,6 +433,7 @@ export function ChatView({
                   <button
                     type="button"
                     aria-label={`Remove ${file.name}`}
+                    disabled={state.busy}
                     onClick={() =>
                       setAttachments((items) =>
                         items.filter((_, itemIndex) => itemIndex !== index),
@@ -365,9 +452,10 @@ export function ChatView({
                 ref={fileInput}
                 type="file"
                 multiple
-                className="sr-only"
+                hidden
                 accept=".txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.sh,.html,.css,.yaml,.yml,.toml,.log"
                 aria-label="Attach text files"
+                disabled={state.busy}
                 onChange={async (event) => {
                   const files = Array.from(event.target.files ?? []);
                   setFileError(null);
@@ -397,6 +485,7 @@ export function ChatView({
                 type="button"
                 className="icon-button"
                 aria-label="Attach text files"
+                disabled={state.busy}
                 onClick={() => fileInput.current?.click()}
               >
                 <Paperclip size={18} />
@@ -405,9 +494,10 @@ export function ChatView({
                 <Cpu size={14} />
                 <span className="sr-only">Model for the next response</span>
                 <select
+                  aria-label="Model for the next response"
                   value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                  disabled={!snapshot.models.length}
+                  onChange={(event) => setModelOverride(event.target.value)}
+                  disabled={state.busy || !snapshot.models.length}
                 >
                   <option value="">Choose model</option>
                   {snapshot.models.map((profile) => (
@@ -421,9 +511,10 @@ export function ChatView({
                 <Folder size={14} />
                 <span className="sr-only">Project</span>
                 <select
+                  aria-label="Project"
                   value={project}
                   onChange={(event) => setProject(event.target.value)}
-                  disabled={!!sessionId}
+                  disabled={state.busy || !!sessionId}
                 >
                   <option value="">No project</option>
                   {snapshot.projects.map((item) => (
@@ -462,6 +553,7 @@ export function ChatView({
                   state.busy ||
                   !model ||
                   !content.trim() ||
+                  (!dot && mode === "work" && !project) ||
                   state.connection !== "connected"
                 }
               >
@@ -480,9 +572,11 @@ export function ChatView({
           </p>
         ) : null}
         <p className="composer-caption">
-          {model
-            ? "Model changes apply to the next task."
-            : "Choose a local model to begin."}
+          {!dot && mode === "work" && !project
+            ? "Choose a project to start a work session."
+            : model
+              ? "Model changes apply to the next task."
+              : "Choose a local model to begin."}
           <span>Shift + Enter for a new line</span>
         </p>
       </div>
@@ -592,14 +686,19 @@ export function ProjectsView({
               event.preventDefault();
               if (!model || !prompt.trim()) return;
               void state.run(async () => {
-                const task = await localApi<Task>("/tasks", "POST", {
-                  prompt: prompt.trim(),
+                const session = await localApi<Session>("/sessions", "POST", {
                   title: prompt.trim().slice(0, 70),
-                  role: "coder",
+                  kind: "work",
+                  dotId: null,
                   projectId: selected.id,
                   modelProfileId: model,
                 });
-                router.push(`/tasks/${task.id}`);
+                const result = await localApi<{ task: Task }>(
+                  `/sessions/${session.id}/messages`,
+                  "POST",
+                  { content: prompt.trim(), modelProfileId: model },
+                );
+                router.push(`/tasks/${result.task.id}`);
               });
             }}
           >
@@ -883,6 +982,9 @@ function GoalForm({
         event.preventDefault();
         const form = new FormData(event.currentTarget);
         const body = {
+          ...(goal
+            ? {}
+            : { dotId: snapshot.settings.selectedDotId ?? "dot-primary" }),
           title: form.get("title"),
           objective: form.get("objective"),
           projectId: form.get("projectId") || null,
@@ -1481,11 +1583,23 @@ function ModelForm({
   );
 }
 
-export function MemoryView({ state, snapshot }: ViewProps) {
+export function MemoryView({
+  state,
+  snapshot,
+  dot,
+}: ViewProps & { dot?: Dot }) {
+  const companion = dot ?? activeDot(snapshot);
+  const [scope, setScope] = useState<"general" | "dot">(
+    companion ? "dot" : "general",
+  );
   const [form, setForm] = useState(false);
   const [editing, setEditing] = useState<Memory | undefined>();
   const [query, setQuery] = useState("");
-  const memories = snapshot.memories.filter((memory) =>
+  const scopedMemories = snapshot.memories.filter(
+    (memory) =>
+      ownerId(memory) === (scope === "general" ? null : companion?.id),
+  );
+  const memories = scopedMemories.filter((memory) =>
     `${memory.title} ${memory.content}`
       .toLowerCase()
       .includes(query.toLowerCase()),
@@ -1509,6 +1623,39 @@ export function MemoryView({ state, snapshot }: ViewProps) {
           </button>
         }
       />
+      <div className="memory-scope-control">
+        <div className="scope-pill" role="group" aria-label="Memory scope">
+          <button
+            className={scope === "general" ? "is-active" : ""}
+            aria-pressed={scope === "general"}
+            onClick={() => {
+              setScope("general");
+              setForm(false);
+              setEditing(undefined);
+            }}
+          >
+            General
+          </button>
+          {companion ? (
+            <button
+              className={scope === "dot" ? "is-active" : ""}
+              aria-pressed={scope === "dot"}
+              onClick={() => {
+                setScope("dot");
+                setForm(false);
+                setEditing(undefined);
+              }}
+            >
+              {companion.name}&apos;s memory
+            </button>
+          ) : null}
+        </div>
+        <p className="muted">
+          {scope === "general"
+            ? "Preferences and context for your independent Chat and Work sessions."
+            : `Private context remembered by ${companion?.name}.`}
+        </p>
+      </div>
       {form ? (
         <form
           key={editing?.id ?? "new"}
@@ -1521,6 +1668,11 @@ export function MemoryView({ state, snapshot }: ViewProps) {
                 editing ? `/memories/${editing.id}` : "/memories",
                 editing ? "PATCH" : "POST",
                 {
+                  ...(editing
+                    ? {}
+                    : {
+                        dotId: scope === "general" ? null : companion?.id,
+                      }),
                   title: values.get("title"),
                   content: values.get("content"),
                   source: editing?.source ?? "User-provided",
@@ -1551,6 +1703,7 @@ export function MemoryView({ state, snapshot }: ViewProps) {
           <label className="form-field">
             <span>Memory</span>
             <textarea
+              aria-label="Memory"
               name="content"
               rows={4}
               required
@@ -1563,7 +1716,7 @@ export function MemoryView({ state, snapshot }: ViewProps) {
           </button>
         </form>
       ) : null}
-      {snapshot.memories.length ? (
+      {scopedMemories.length ? (
         <>
           <label className="search-input">
             <Search size={17} />

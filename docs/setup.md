@@ -21,6 +21,7 @@ cp .env.example .env
 chmod 600 .env
 npm ci
 docker build -t cit-dots-sandbox:latest sandbox
+docker build -t cit-dots-desktop:latest -f desktop/Dockerfile .
 npm run dev
 ```
 
@@ -37,6 +38,32 @@ Use an existing `.env` rather than replacing it on subsequent setup. The service
 The broker generates `.cit-data/internal-token` with private file permissions when no `CIT_INTERNAL_TOKEN` is set. Keep this file and `.env` private. The browser communicates through the Next server; it does not receive the internal service token. The normal local-model configuration does not require a paid API key.
 
 `CIT_DATA_DIR` selects application storage and defaults to `.cit-data` under the checkout. Preserve that directory and `.eve/.workflow-data`. Choose a stable checkout path for a workstation with active workflows. Application storage must sit outside any project registered for coding to avoid recursive snapshots.
+
+## Set up your Dots and their computers
+
+The application creates Pip as the primary Dot. You can rename it, change its personality and pet appearance, and select its default model. Its primary status cannot change and it cannot be removed. Additional Dots can be created and removed; each has separate conversations, work, memories and notifications. Local model profiles and registered projects are shared resources.
+
+Selecting a Dot opens its persistent main conversation, with its pet/name, computer status, activity and output files alongside it. Meaningful progress, results and questions from child workers and scheduled work also appear there. The upper-right New chat button opens an empty conversation with a Chat/Work selector; both modes create independent sessions without a Dot. Independent chat cannot access a Dot's private memories or computer; independent work uses its approved project workspace. Removing an extra Dot retains these independent sessions and original source projects.
+
+Select a Dot, open Computer and choose Start. The desktop is a real Ubuntu 26.04/Xfce session streamed through TigerVNC/noVNC, with a browser, terminal and file manager. Use Stop when the computer is no longer needed. Its persistent directories are:
+
+```text
+.cit-data/dots/<dotId>/computer/home
+.cit-data/dots/<dotId>/computer/workspace
+.cit-data/dots/<dotId>/computer/artifacts
+```
+
+These paths are under `CIT_DATA_DIR` if you customize it. The interactive desktop and that Dot's file/command tools use the owned computer directories; temporary worker sessions do not create a new Dot identity. Stopping a desktop or closing the GUI keeps its files. Removing an extra Dot deletes its owned records and files after stopping its work, while retaining original registered source projects.
+
+Inside both the sandbox runner and graphical desktop, the persistent home is `/home/cit`, the workspace is `/workspace` and artifacts are `/artifacts`. Keeping those paths stable allows home-installed tools, including virtual environments, to work across desktop start/stop.
+
+Agents can read and write files and run commands in this computer, including launching graphical apps through its display session. Direct automated screenshot, mouse and keyboard tools are not included. You can operate the live desktop interactively through noVNC.
+
+Each desktop is a Docker container sharing the host kernel. It uses an internal network without outbound internet and does not receive the host Docker socket or GPU devices. The browser is available for local content; starting a desktop does not grant internet access. Approved network-enabled agent commands use the existing separate approval mechanism.
+
+The noVNC connection uses a broker-managed loopback display relay into the owned container's private internal network. The broker does not automatically include its generated connection URL or password in model context or logs. The guest can read its own VNC authentication files, so the password is not hidden from code running inside that desktop. Do not share the connection URL as a public desktop link. A missing image or unavailable Docker daemon produces a setup/error state rather than a simulated live desktop.
+
+The desktop image depends on the sandbox image built immediately before it. Build both before testing computer startup; a running broker does not download or build them automatically.
 
 ## Connect a model
 
@@ -69,3 +96,5 @@ The installer records absolute paths to this checkout and the current Node execu
 ## First-use acceptance
 
 Confirm a real local-model reply, a successful tool-use task and a saved message after a service restart. Close the browser during a task, reopen it and inspect the result. Then perform the hardware checklist and backup/restore procedure. Dependency installation or a successful build alone does not establish those behaviors.
+
+For each Dot computer, create a file, stop and restart its desktop, and verify that the file remains. Check that another Dot cannot access it. A successful noVNC page response alone does not prove that the graphical session, browser or terminal works.

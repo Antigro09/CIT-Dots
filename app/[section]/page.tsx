@@ -2,6 +2,9 @@ import { notFound } from "next/navigation";
 import { DotsConsole, type Section } from "@/components/dots/console";
 
 const sections = new Set([
+  "dots",
+  "computer",
+  "work",
   "chat",
   "projects",
   "goals",

@@ -2,10 +2,11 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { Event } from "../shared/types";
+import { PRIMARY_DOT_ID, type Dot, type Event } from "../shared/types";
 
 /** Collections are fixed even though their payloads are JSON. No SQL identifiers come from callers. */
 export const COLLECTIONS = [
+  "dots",
   "sessions",
   "messages",
   "tasks",
@@ -95,6 +96,7 @@ export class Store {
       "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;",
     );
     this.migrate();
+    this.migrateDots();
   }
 
   private migrate(): void {
@@ -149,6 +151,106 @@ export class Store {
         ) STRICT;
         PRAGMA user_version = 1;
       `);
+    });
+  }
+
+  /** Adds ownership to pre-Dot databases without replacing authored fields or existing owners. */
+  private migrateDots(): void {
+    this.transaction(() => {
+      if (!this.get<Dot>("dots", PRIMARY_DOT_ID)) {
+        this.insert<Dot>("dots", {
+          id: PRIMARY_DOT_ID,
+          name: "Pip",
+          personality:
+            "A thoughtful, practical helper who follows through on useful work, asks clear questions, and keeps you informed when there is meaningful progress.",
+          avatar: { kind: "blob", color: "#a7e8c7" },
+          isPrimary: true,
+          modelProfileId: null,
+        });
+      }
+
+      const owner = (
+        record: StoredRecord | undefined,
+      ): string | null | undefined => {
+        if (record?.dotId === null) return null;
+        return typeof record?.dotId === "string" && record.dotId
+          ? record.dotId
+          : undefined;
+      };
+      const assign = (
+        collection: Collection,
+        record: StoredRecord,
+        dotId: string | null,
+      ): void => {
+        if (owner(record) !== undefined) return;
+        this.update(collection, record.id, { dotId });
+        record.dotId = dotId;
+      };
+      const sessions = new Map(
+        this.list<StoredRecord>("sessions").map((record) => [
+          record.id,
+          record,
+        ]),
+      );
+      for (const session of sessions.values())
+        assign(
+          "sessions",
+          session,
+          session.kind === "chat" || session.kind === "work"
+            ? null
+            : PRIMARY_DOT_ID,
+        );
+      const tasks = new Map(
+        this.list<StoredRecord>("tasks").map((record) => [record.id, record]),
+      );
+      const resolving = new Set<string>();
+      const taskOwner = (id: string): string | null | undefined => {
+        const task = tasks.get(id);
+        if (!task) return undefined;
+        const existing = owner(task);
+        if (existing !== undefined) return existing;
+        if (resolving.has(id)) return undefined;
+        resolving.add(id);
+        const parentOwner =
+          typeof task.parentId === "string"
+            ? taskOwner(task.parentId)
+            : undefined;
+        const sessionOwner =
+          typeof task.sessionId === "string"
+            ? owner(sessions.get(task.sessionId))
+            : undefined;
+        const dotId =
+          parentOwner !== undefined
+            ? parentOwner
+            : sessionOwner !== undefined
+              ? sessionOwner
+              : PRIMARY_DOT_ID;
+        assign("tasks", task, dotId);
+        resolving.delete(id);
+        return dotId;
+      };
+      for (const task of tasks.values()) taskOwner(task.id);
+      for (const collection of ["goals", "memories", "inbox"] as const) {
+        for (const record of this.list<StoredRecord>(collection)) {
+          const owningTask =
+            typeof record.taskId === "string"
+              ? taskOwner(record.taskId)
+              : undefined;
+          const owningSession =
+            typeof record.sessionId === "string"
+              ? owner(sessions.get(record.sessionId))
+              : undefined;
+          assign(
+            collection,
+            record,
+            owningTask !== undefined
+              ? owningTask
+              : owningSession !== undefined
+                ? owningSession
+                : PRIMARY_DOT_ID,
+          );
+        }
+      }
     });
   }
 
@@ -271,6 +373,13 @@ export class Store {
       updatedAt: input.updatedAt ?? now,
       version: 1,
     } as T & RecordMetadata;
+    if (collection === "dots") {
+      const isPrimary = (value as unknown as Partial<Dot>).isPrimary;
+      if (isPrimary !== (id === PRIMARY_DOT_ID))
+        throw new Error(
+          "Only the permanent primary Dot may have primary status.",
+        );
+    }
     try {
       this.db
         .prepare(
@@ -312,10 +421,17 @@ export class Store {
         (() => {
           throw new MissingRecordError(collection, id);
         })();
+      const wasPrimary = (old as Partial<Dot>).isPrimary;
       const next =
         typeof patch === "function" ? patch(old) : { ...old, ...patch };
       if ((next as T & { id: string }).id !== id)
         throw new Error("Record IDs cannot be changed");
+      if (
+        collection === "dots" &&
+        ((next as Partial<Dot>).isPrimary !== wasPrimary ||
+          (id === PRIMARY_DOT_ID && (next as Partial<Dot>).isPrimary !== true))
+      )
+        throw new Error("A Dot's primary status cannot be changed or removed.");
       const value = {
         ...next,
         id,
@@ -355,6 +471,11 @@ export class Store {
 
   remove(collection: Collection, id: string): boolean {
     this.checkCollection(collection);
+    if (
+      collection === "dots" &&
+      (id === PRIMARY_DOT_ID || this.get<Dot>(collection, id)?.isPrimary)
+    )
+      throw new Error("The primary Dot cannot be removed.");
     return (
       this.db
         .prepare("DELETE FROM records WHERE collection = ? AND id = ?")
@@ -467,6 +588,47 @@ export class Store {
 
   latestEventCursor(): number {
     return this.latestCursor();
+  }
+
+  /** Remove an extra Dot's private history together with its owned records. */
+  purgeDotHistory(
+    dotId: string,
+    taskIds: string[],
+    sessionIds: string[],
+    goalIds: string[],
+  ): void {
+    const tasks = JSON.stringify(taskIds);
+    const sessions = JSON.stringify(sessionIds);
+    const goals = JSON.stringify(goalIds);
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `DELETE FROM audit_events
+           WHERE type NOT GLOB 'model.*'
+             AND type NOT GLOB 'project.*'
+             AND type NOT GLOB 'settings.*'
+             AND (
+               task_id IN (SELECT value FROM json_each(?))
+               OR session_id IN (SELECT value FROM json_each(?))
+               OR json_extract(data, '$.dotId') = ?
+               OR (type IN ('dot.created', 'dot.updated', 'dot.session')
+                   AND json_extract(data, '$.id') = ?)
+               OR json_extract(data, '$.taskId') IN (SELECT value FROM json_each(?))
+               OR json_extract(data, '$.sessionId') IN (SELECT value FROM json_each(?))
+               OR json_extract(data, '$.goalId') IN (SELECT value FROM json_each(?))
+               OR (type GLOB 'goal.*'
+                   AND json_extract(data, '$.id') IN (SELECT value FROM json_each(?)))
+             )`,
+        )
+        .run(tasks, sessions, dotId, dotId, tasks, sessions, goals, goals);
+      this.db
+        .prepare(
+          `DELETE FROM schedule_occurrences
+           WHERE goal_id IN (SELECT value FROM json_each(?))
+              OR task_id IN (SELECT value FROM json_each(?))`,
+        )
+        .run(goals, tasks);
+    });
   }
 
   /** Wrap this and task insertion in transaction() so the occurrence and its job commit together. */

@@ -4,6 +4,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { computerUser } from "./computers";
 
 const exec = promisify(execFile);
 const MAX_FILE = 2 * 1024 * 1024;
@@ -33,6 +34,10 @@ export interface Workspace {
   baseline: string;
   metadataPath: string;
   kind: "git" | "copy";
+  /** Trusted Dot ownership; absent on legacy project-only workspaces. */
+  scope?: "project" | "computer";
+  dotId?: string;
+  computerRoot?: string;
   branch?: string;
   baseCommit?: string;
   createdAt: string;
@@ -301,7 +306,16 @@ export async function loadWorkspace(metadataPath: string): Promise<Workspace> {
   const workspace = JSON.parse(
     await fs.readFile(metadataPath, "utf8"),
   ) as Workspace;
-  if (
+  if (workspace.scope === "computer") {
+    if (
+      workspace.metadataPath !== metadataPath ||
+      !workspace.computerRoot ||
+      workspace.root !== path.join(workspace.computerRoot, "workspace") ||
+      !workspace.dotId ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(workspace.dotId)
+    )
+      throw new Error("Invalid computer workspace metadata.");
+  } else if (
     workspace.metadataPath !== metadataPath ||
     path.dirname(workspace.root) !== path.dirname(metadataPath) ||
     path.dirname(workspace.baseline) !== path.dirname(metadataPath)
@@ -316,31 +330,38 @@ export async function listFiles(
   workspace: Workspace,
   relative = "",
 ): Promise<{ path: string; type: "file" | "directory"; size: number }[]> {
-  return withWorkspaceLock(workspace.root, async () => {
-    const directory = await safePath(workspace.root, relative);
-    const entries = await fs.readdir(directory, { withFileTypes: true });
-    if (entries.length > MAX_FILES)
-      throw new Error("Directory contains too many entries.");
-    const result = [];
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (
-        OMIT.has(entry.name) ||
-        entry.isSymbolicLink() ||
-        (!entry.isFile() && !entry.isDirectory())
-      )
-        continue;
-      const file = await safePath(
-        workspace.root,
-        path.join(relative, entry.name),
-      );
-      result.push({
-        path: path.posix.join(relative, entry.name),
-        type: entry.isDirectory() ? ("directory" as const) : ("file" as const),
-        size: (await fs.stat(file)).size,
-      });
-    }
-    return result;
-  });
+  return withWorkspaceLock(
+    workspace.computerRoot ?? workspace.root,
+    async () => {
+      const directory = await safePath(workspace.root, relative);
+      const entries = await fs.readdir(directory, { withFileTypes: true });
+      if (entries.length > MAX_FILES)
+        throw new Error("Directory contains too many entries.");
+      const result = [];
+      for (const entry of entries.sort((a, b) =>
+        a.name.localeCompare(b.name),
+      )) {
+        if (
+          OMIT.has(entry.name) ||
+          entry.isSymbolicLink() ||
+          (!entry.isFile() && !entry.isDirectory())
+        )
+          continue;
+        const file = await safePath(
+          workspace.root,
+          path.join(relative, entry.name),
+        );
+        result.push({
+          path: path.posix.join(relative, entry.name),
+          type: entry.isDirectory()
+            ? ("directory" as const)
+            : ("file" as const),
+          size: (await fs.stat(file)).size,
+        });
+      }
+      return result;
+    },
+  );
 }
 
 export async function readFile(
@@ -348,23 +369,26 @@ export async function readFile(
   relative: string,
 ): Promise<string> {
   assertRelative(relative);
-  return withWorkspaceLock(workspace.root, async () => {
-    const handle = await fs.open(
-      await safePath(workspace.root, relative),
-      constants.O_RDONLY | constants.O_NOFOLLOW,
-    );
-    try {
-      const info = await handle.stat();
-      if (!info.isFile() || info.size > MAX_FILE)
-        throw new Error("Read accepts regular files up to 2 MiB.");
-      const content = await handle.readFile();
-      if (content.includes(0))
-        throw new Error("Binary file cannot be read as text.");
-      return content.toString("utf8");
-    } finally {
-      await handle.close();
-    }
-  });
+  return withWorkspaceLock(
+    workspace.computerRoot ?? workspace.root,
+    async () => {
+      const handle = await fs.open(
+        await safePath(workspace.root, relative),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.size > MAX_FILE)
+          throw new Error("Read accepts regular files up to 2 MiB.");
+        const content = await handle.readFile();
+        if (content.includes(0))
+          throw new Error("Binary file cannot be read as text.");
+        return content.toString("utf8");
+      } finally {
+        await handle.close();
+      }
+    },
+  );
 }
 
 export async function writeFile(
@@ -375,24 +399,47 @@ export async function writeFile(
   assertRelative(relative);
   if (typeof content !== "string" || Buffer.byteLength(content) > MAX_FILE)
     throw new Error("Write accepts text up to 2 MiB.");
-  return withWorkspaceLock(workspace.root, async () => {
-    const target = await safePath(workspace.root, relative, true);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await safePath(workspace.root, relative, true);
-    const handle = await fs.open(
-      target,
-      constants.O_CREAT |
-        constants.O_WRONLY |
-        constants.O_TRUNC |
-        constants.O_NOFOLLOW,
-      0o644,
-    );
-    try {
-      await handle.writeFile(content);
-    } finally {
-      await handle.close();
-    }
-  });
+  return withWorkspaceLock(
+    workspace.computerRoot ?? workspace.root,
+    async () => {
+      const target = await safePath(workspace.root, relative, true);
+      await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+      await safePath(workspace.root, relative, true);
+      if (workspace.computerRoot && process.getuid?.() === 0) {
+        const { uid, gid } = computerUser();
+        let directory = workspace.root;
+        await fs.lchown(directory, uid, gid);
+        for (const segment of path
+          .relative(workspace.root, path.dirname(target))
+          .split(path.sep)
+          .filter(Boolean)) {
+          directory = path.join(directory, segment);
+          await safePath(
+            workspace.root,
+            path.relative(workspace.root, directory),
+          );
+          await fs.lchown(directory, uid, gid);
+        }
+      }
+      const handle = await fs.open(
+        target,
+        constants.O_CREAT |
+          constants.O_WRONLY |
+          constants.O_TRUNC |
+          constants.O_NOFOLLOW,
+        0o600,
+      );
+      try {
+        await handle.writeFile(content);
+        if (workspace.computerRoot && process.getuid?.() === 0) {
+          const { uid, gid } = computerUser();
+          await handle.chown(uid, gid);
+        }
+      } finally {
+        await handle.close();
+      }
+    },
+  );
 }
 
 type SnapshotFile = {
@@ -502,133 +549,148 @@ async function atomicWrite(
 export async function workspaceDiff(
   workspace: Workspace,
 ): Promise<WorkspaceDiff> {
-  return withWorkspaceLock(workspace.root, async () => {
-    const { files } = await changes(workspace);
-    let patch = "",
-      truncated = false;
-    for (const file of files) {
-      const oldFile =
-        file.status === "added"
-          ? "/dev/null"
-          : await safePath(workspace.baseline, file.path);
-      const newFile =
-        file.status === "deleted"
-          ? "/dev/null"
-          : await safePath(workspace.root, file.path);
-      let diff = "";
-      try {
-        const result = await exec(
-          "git",
-          [
-            "diff",
-            "--no-index",
-            "--no-ext-diff",
-            "--binary",
-            "--",
-            oldFile,
-            newFile,
-          ],
-          { maxBuffer: 4 * MAX_FILE },
-        );
-        diff = result.stdout;
-      } catch (error) {
-        const failure = error as { code?: number; stdout?: string };
-        if (failure.code !== 1) throw error;
-        diff = failure.stdout ?? "";
+  if (workspace.scope === "computer")
+    return { patch: "", files: [], truncated: false };
+  return withWorkspaceLock(
+    workspace.computerRoot ?? workspace.root,
+    async () => {
+      const { files } = await changes(workspace);
+      let patch = "",
+        truncated = false;
+      for (const file of files) {
+        const oldFile =
+          file.status === "added"
+            ? "/dev/null"
+            : await safePath(workspace.baseline, file.path);
+        const newFile =
+          file.status === "deleted"
+            ? "/dev/null"
+            : await safePath(workspace.root, file.path);
+        let diff = "";
+        try {
+          const result = await exec(
+            "git",
+            [
+              "diff",
+              "--no-index",
+              "--no-ext-diff",
+              "--binary",
+              "--",
+              oldFile,
+              newFile,
+            ],
+            { maxBuffer: 4 * MAX_FILE },
+          );
+          diff = result.stdout;
+        } catch (error) {
+          const failure = error as { code?: number; stdout?: string };
+          if (failure.code !== 1) throw error;
+          diff = failure.stdout ?? "";
+        }
+        diff = diff
+          .replaceAll(workspace.baseline + "/", "")
+          .replaceAll(workspace.root + "/", "");
+        if (Buffer.byteLength(patch + diff) > 4 * MAX_FILE) {
+          truncated = true;
+          break;
+        }
+        patch += diff;
       }
-      diff = diff
-        .replaceAll(workspace.baseline + "/", "")
-        .replaceAll(workspace.root + "/", "");
-      if (Buffer.byteLength(patch + diff) > 4 * MAX_FILE) {
-        truncated = true;
-        break;
-      }
-      patch += diff;
-    }
-    return { patch, files, truncated };
-  });
+      return { patch, files, truncated };
+    },
+  );
 }
 
 /** All destination hashes are checked before writes. Existing unrelated edits are preserved. */
 export async function applyWorkspace(
   workspace: Workspace,
 ): Promise<{ files: string[] }> {
-  return withWorkspaceLock(workspace.root, async () => {
-    const canonical = await fs.realpath(workspace.projectPath);
-    if (canonical !== workspace.projectPath)
-      throw new Error("Project location changed.");
-    const { files, before, after } = await changes(workspace);
-    const saved = new Map<string, { content: Buffer; mode: number } | null>();
-    const replacements = new Map<string, Buffer>();
-    for (const file of files) {
-      const target = await safePath(canonical, file.path, true);
-      let actual: Buffer | null = null,
-        mode = 0o644;
-      try {
-        const handle = await fs.open(
-          target,
-          constants.O_RDONLY | constants.O_NOFOLLOW,
-        );
-        try {
-          const stat = await handle.stat();
-          if (!stat.isFile())
-            throw new Error("Destination is not a regular file.");
-          mode = stat.mode & 0o777;
-          actual = await handle.readFile();
-        } finally {
-          await handle.close();
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      const expected = before.get(file.path);
-      const hash =
-        actual === null
-          ? undefined
-          : createHash("sha256").update(actual).digest("hex");
-      if (hash !== expected?.hash || (expected && mode !== expected.mode))
-        throw new Error(
-          `Conflict: ${file.path} changed in the original project. No changes applied.`,
-        );
-      saved.set(file.path, actual === null ? null : { content: actual, mode });
-      if (file.status !== "deleted")
-        replacements.set(
-          file.path,
-          await fs.readFile(await safePath(workspace.root, file.path)),
-        );
-    }
-    const applied: string[] = [];
-    try {
+  if (workspace.scope === "computer")
+    throw new Error(
+      "A Dot's private computer cannot be applied to a host project.",
+    );
+  return withWorkspaceLock(
+    workspace.computerRoot ?? workspace.root,
+    async () => {
+      const canonical = await fs.realpath(workspace.projectPath);
+      if (canonical !== workspace.projectPath)
+        throw new Error("Project location changed.");
+      const { files, before, after } = await changes(workspace);
+      const saved = new Map<string, { content: Buffer; mode: number } | null>();
+      const replacements = new Map<string, Buffer>();
       for (const file of files) {
         const target = await safePath(canonical, file.path, true);
-        if (file.status === "deleted") await fs.unlink(target);
-        else
-          await atomicWrite(
-            canonical,
+        let actual: Buffer | null = null,
+          mode = 0o644;
+        try {
+          const handle = await fs.open(
+            target,
+            constants.O_RDONLY | constants.O_NOFOLLOW,
+          );
+          try {
+            const stat = await handle.stat();
+            if (!stat.isFile())
+              throw new Error("Destination is not a regular file.");
+            mode = stat.mode & 0o777;
+            actual = await handle.readFile();
+          } finally {
+            await handle.close();
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        const expected = before.get(file.path);
+        const hash =
+          actual === null
+            ? undefined
+            : createHash("sha256").update(actual).digest("hex");
+        if (hash !== expected?.hash || (expected && mode !== expected.mode))
+          throw new Error(
+            `Conflict: ${file.path} changed in the original project. No changes applied.`,
+          );
+        saved.set(
+          file.path,
+          actual === null ? null : { content: actual, mode },
+        );
+        if (file.status !== "deleted")
+          replacements.set(
             file.path,
-            replacements.get(file.path)!,
-            after.get(file.path)!.mode,
+            await fs.readFile(await safePath(workspace.root, file.path)),
           );
-        applied.push(file.path);
       }
-    } catch (error) {
-      // Recover already-written files when a filesystem error interrupts application.
-      for (const relative of applied.reverse()) {
-        const target = await safePath(canonical, relative, true),
-          previous = saved.get(relative);
-        if (previous)
-          await atomicWrite(
-            canonical,
-            relative,
-            previous.content,
-            previous.mode,
-          );
-        else await fs.rm(target, { force: true });
+      const applied: string[] = [];
+      try {
+        for (const file of files) {
+          const target = await safePath(canonical, file.path, true);
+          if (file.status === "deleted") await fs.unlink(target);
+          else
+            await atomicWrite(
+              canonical,
+              file.path,
+              replacements.get(file.path)!,
+              after.get(file.path)!.mode,
+            );
+          applied.push(file.path);
+        }
+      } catch (error) {
+        // Recover already-written files when a filesystem error interrupts application.
+        for (const relative of applied.reverse()) {
+          const target = await safePath(canonical, relative, true),
+            previous = saved.get(relative);
+          if (previous)
+            await atomicWrite(
+              canonical,
+              relative,
+              previous.content,
+              previous.mode,
+            );
+          else await fs.rm(target, { force: true });
+        }
+        throw error;
       }
-      throw error;
-    }
-    return { files: files.map((file) => file.path) };
-  });
+      return { files: files.map((file) => file.path) };
+    },
+  );
 }
 
 export async function exportPatch(workspace: Workspace): Promise<string> {
@@ -638,27 +700,35 @@ export async function exportPatch(workspace: Workspace): Promise<string> {
 }
 
 export async function removeWorkspace(workspace: Workspace): Promise<void> {
-  return withWorkspaceLock(workspace.root, async () => {
-    // Clean up pre-clone workspaces too, if a development database retained one.
-    if (
-      workspace.kind === "git" &&
-      (await fs.lstat(path.join(workspace.root, ".git"))).isFile()
-    )
-      await exec(
-        "git",
-        [
-          "-C",
-          workspace.projectPath,
-          "worktree",
-          "remove",
-          "--force",
-          workspace.root,
-        ],
-        { timeout: 30_000 },
-      );
-    await fs.rm(path.dirname(workspace.metadataPath), {
-      recursive: true,
-      force: true,
-    });
-  });
+  return withWorkspaceLock(
+    workspace.computerRoot ?? workspace.root,
+    async () => {
+      if (workspace.scope === "computer") {
+        // A task ending must never delete the Dot's permanent computer files.
+        await fs.rm(workspace.metadataPath, { force: true });
+        return;
+      }
+      // Clean up pre-clone workspaces too, if a development database retained one.
+      if (
+        workspace.kind === "git" &&
+        (await fs.lstat(path.join(workspace.root, ".git"))).isFile()
+      )
+        await exec(
+          "git",
+          [
+            "-C",
+            workspace.projectPath,
+            "worktree",
+            "remove",
+            "--force",
+            workspace.root,
+          ],
+          { timeout: 30_000 },
+        );
+      await fs.rm(path.dirname(workspace.metadataPath), {
+        recursive: true,
+        force: true,
+      });
+    },
+  );
 }

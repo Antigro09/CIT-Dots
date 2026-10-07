@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Cron } from "croner";
 import { Broker, defaultSettings } from "./broker";
 import { getConfig, internalToken, type AppConfig } from "./config";
+import { listFiles, readFile, writeFile } from "./workspaces";
 import {
   discoverModels,
   probeModel,
@@ -12,6 +13,7 @@ import {
 } from "./models";
 import type {
   Approval,
+  Dot,
   Goal,
   InboxItem,
   Memory,
@@ -53,10 +55,13 @@ const settingsInput = z
     maxRunMinutes: z.number().int().min(1).max(240),
     maxTokensPerGoal: z.number().int().min(1000).max(10000000),
     sandboxImage: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]+$/),
+    desktopImage: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]+$/),
+    selectedDotId: z.string().min(1).max(100),
     theme: z.enum(["dark", "light", "system"]),
   })
   .partial();
 const goalInput = z.object({
+  dotId: z.string().nullable().optional(),
   title: z.string().min(1).max(200),
   objective: content,
   sessionId: z.string().optional(),
@@ -138,6 +143,99 @@ export function createApp(
   });
   app.get("/api/local/health", () => ({ ok: true }));
   app.get("/api/local/snapshot", () => broker.snapshot());
+  const dotInput = z
+    .object({
+      name: z.string().trim().min(1).max(80),
+      personality: z.string().max(8000).optional(),
+      avatar: z
+        .object({
+          kind: z.enum(["blob", "cat", "dog", "robot"]),
+          color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+        })
+        .strict()
+        .optional(),
+      modelProfileId: z.string().nullable().optional(),
+    })
+    .strict();
+  app.post("/api/local/dots", (request) =>
+    broker.createDot(dotInput.parse(request.body)),
+  );
+  app.patch("/api/local/dots/:id", (request) =>
+    broker.updateDot(pathId(request), dotInput.partial().parse(request.body)),
+  );
+  app.delete("/api/local/dots/:id", (request) =>
+    broker.removeDot(pathId(request)),
+  );
+  app.get("/api/local/dots/:id/session", (request) =>
+    broker.dotSession(pathId(request)),
+  );
+  app.get("/api/local/dots/:id/computer", (request) =>
+    broker.computerStatus(pathId(request)),
+  );
+  app.post("/api/local/dots/:id/computer/start", async (request) => {
+    const id = pathId(request);
+    return broker.withComputer(id, async () => {
+      const desktop = await broker.desktops.start(id);
+      broker.event("desktop.updated", { dotId: id, state: desktop.state });
+      return { dotId: id, desktop };
+    });
+  });
+  app.post("/api/local/dots/:id/computer/stop", async (request) => {
+    const id = pathId(request);
+    return broker.withComputer(id, async () => {
+      const desktop = await broker.desktops.stop(id);
+      broker.event("desktop.updated", { dotId: id, state: desktop.state });
+      return { dotId: id, desktop };
+    });
+  });
+  app.get("/api/local/dots/:id/computer/files", async (request) => {
+    const path = z
+      .string()
+      .max(4096)
+      .default(".")
+      .parse((request.query as { path?: string }).path);
+    return broker.withComputer(pathId(request), async () => ({
+      files: await listFiles(
+        await broker.computerWorkspace(pathId(request)),
+        path,
+      ),
+    }));
+  });
+  app.get("/api/local/dots/:id/computer/file", async (request) => {
+    const path = z
+      .string()
+      .min(1)
+      .max(4096)
+      .parse((request.query as { path?: string }).path);
+    return broker.withComputer(pathId(request), async () => ({
+      path,
+      content: await readFile(
+        await broker.computerWorkspace(pathId(request)),
+        path,
+      ),
+    }));
+  });
+  app.put("/api/local/dots/:id/computer/file", async (request) => {
+    const input = z
+      .object({
+        path: z.string().min(1).max(4096),
+        content: z.string().max(500000),
+      })
+      .strict()
+      .parse(request.body);
+    return broker.withComputer(pathId(request), async () => {
+      await writeFile(
+        await broker.computerWorkspace(pathId(request)),
+        input.path,
+        input.content,
+      );
+      broker.event("computer.file.updated", {
+        dotId: pathId(request),
+        path: input.path,
+      });
+      return { ok: true, path: input.path };
+    });
+  });
   app.get("/api/local/events", async (request, reply) => {
     const parsed = Number(
       (request.query as { after?: string }).after ||
@@ -173,6 +271,8 @@ export function createApp(
     broker.createSession(
       z
         .object({
+          kind: z.enum(["dot", "chat", "work"]).optional(),
+          dotId: z.string().nullable().optional(),
           title: z.string().max(200).optional(),
           projectId: z.string().nullable().optional(),
           modelProfileId: z.string().nullable().optional(),
@@ -214,6 +314,7 @@ export function createApp(
     broker.createTask(
       z
         .object({
+          dotId: z.string().nullable().optional(),
           sessionId: z.string().optional(),
           prompt: content,
           role: z
@@ -332,6 +433,20 @@ export function createApp(
     )
       throw new Error("This model is used by an active task.");
     broker.store.remove("models", id);
+    for (const dot of broker.store.list<Dot>("dots", {
+      predicate: (dot) => dot.modelProfileId === id,
+    }))
+      broker.updateDot(dot.id, { modelProfileId: null });
+    for (const session of broker.store.list<Session>("sessions", {
+      predicate: (session) => session.modelProfileId === id,
+    }))
+      broker.store.update<Session>("sessions", session.id, {
+        modelProfileId: null,
+      });
+    const roleModels = { ...broker.settings().roleModelProfileIds };
+    for (const [role, modelId] of Object.entries(roleModels))
+      if (modelId === id) roleModels[role as Task["role"]] = null;
+    broker.updateSettings({ roleModelProfileIds: roleModels });
     if (broker.settings().defaultModelProfileId === id)
       broker.updateSettings({ defaultModelProfileId: null });
     broker.event("model.removed", { id });
@@ -371,10 +486,15 @@ export function createApp(
     const session = input.sessionId
       ? broker.store.require<Session>("sessions", input.sessionId)
       : broker.createSession({
+          kind: input.dotId === null ? "work" : "dot",
+          dotId: input.dotId,
           title: input.title,
           projectId: input.projectId,
           modelProfileId: input.modelProfileId,
         });
+    if (input.dotId !== undefined && input.dotId !== broker.dotId(session))
+      throw new Error("The goal session belongs to a different Dot.");
+    if (broker.dotId(session) !== null) broker.dot(broker.dotId(session)!);
     let nextRunAt = input.nextRunAt;
     if (!nextRunAt) {
       if (input.scheduleType === "cron")
@@ -391,6 +511,7 @@ export function createApp(
     }
     const goal = broker.store.insert<Goal>("goals", {
       ...input,
+      dotId: broker.dotId(session),
       sessionId: session.id,
       nextRunAt,
     });
@@ -405,6 +526,14 @@ export function createApp(
       ...goalInput.partial().parse(request.body),
     });
     validateGoal(input);
+    if (input.dotId !== undefined && input.dotId !== broker.dotId(current))
+      throw new Error("A goal cannot be transferred to another Dot.");
+    const session = broker.store.require<Session>(
+      "sessions",
+      input.sessionId || current.sessionId,
+    );
+    if (broker.dotId(session) !== broker.dotId(current))
+      throw new Error("The goal session belongs to a different Dot.");
     const goal = broker.store.update<Goal>("goals", id, input);
     broker.event("goal.updated", goal);
     return goal;
@@ -437,10 +566,12 @@ export function createApp(
     source: z.string().max(500).optional(),
   });
   app.post("/api/local/memories", (request) => {
-    const memory = broker.store.insert<Memory>(
-      "memories",
-      memorySchema.parse(request.body),
-    );
+    const input = memorySchema
+      .extend({ dotId: z.string().nullable().optional() })
+      .strict()
+      .parse(request.body);
+    const dotId = input.dotId === null ? null : broker.dot(input.dotId).id;
+    const memory = broker.store.insert<Memory>("memories", { ...input, dotId });
     broker.event("memory.created", memory);
     return memory;
   });
@@ -448,7 +579,7 @@ export function createApp(
     const memory = broker.store.update<Memory>(
       "memories",
       pathId(request),
-      memorySchema.partial().parse(request.body),
+      memorySchema.partial().strict().parse(request.body),
     );
     broker.event("memory.updated", memory);
     return memory;

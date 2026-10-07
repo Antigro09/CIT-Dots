@@ -1,6 +1,6 @@
 # CIT Dots
 
-A local assistant framework with a chat interface, persistent tasks, specialist workers, coding workspaces and local model profiles. It uses Node 24, Next.js, Eve and SQLite. Ollama or LM Studio supplies the model; the application does not need a cloud model API key.
+A local assistant framework with personal Dots, a chat interface, persistent tasks, specialist workers and a real graphical Linux computer for each Dot. It uses Node 24, Next.js, Eve, SQLite and Docker. Ollama or LM Studio supplies the model; the application does not need a cloud model API key.
 
 The broker and agent worker run independently of the browser. They can continue accepted work and deliver results to a durable inbox after the GUI closes. User-defined goals can trigger scheduled work. Idle services wait rather than continuously spending GPU time or posting check-ins.
 
@@ -12,10 +12,13 @@ Install Node 24, Docker and a local model server, then follow [the workstation s
 cp .env.example .env
 npm ci
 docker build -t cit-dots-sandbox:latest sandbox
+docker build -t cit-dots-desktop:latest -f desktop/Dockerfile .
 npm run dev
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000). Add a local model profile, discover the model IDs and run its connection/tool-use check. Register a project for coding work. The default database is empty; setup does not add demo conversations or download model weights.
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000). Pip, the permanent primary Dot, is created automatically. Customize its name and pet, add a local model profile and run its connection/tool-use check. Add extra Dots when needed, and open Computer to start the selected Dot's Ubuntu/Xfce desktop. Setup adds no demo conversations and downloads no model weights. Register a project when you want reviewable changes to an existing repository.
+
+Use the upper-right New chat button to open an empty conversation, then choose Chat or Work for an independent session without a Dot. Selecting a Dot opens its saved main conversation, with its identity, computer, activity and output files beside it. Meaningful updates and questions from its child workers and scheduled work appear in that main conversation. Independent sessions keep their own identity and survive removal of an extra Dot.
 
 For daily background use, build and install the user services:
 
@@ -30,20 +33,25 @@ See [the operations runbook](docs/runbook.md) for desktop notifications, startup
 
 ## What the framework provides
 
+- A permanent primary Dot plus removable additional Dots, each with its own name, personality, pet and saved work.
+- An interactive Ubuntu 26.04/Xfce computer per Dot, with a browser, terminal and file manager; its home, workspace and artifacts persist when stopped.
 - Text chat and task progress, results, questions and errors in a persistent session.
+- Independent chat and coding/work sessions without a Dot.
 - Coordinator, coding, investigation and review workers with bounded delegation.
 - Registered project workspaces, Docker command execution and reviewable diffs.
 - Model profiles and snapshots for tasks, with concurrency and execution budgets.
 - User-defined one-time, interval and cron goals, plus explicit local memories.
 - A durable notification inbox and an optional Ubuntu desktop bridge.
 
-External effects and network-enabled command execution require the application's approval flow. Review a task's diff before applying its workspace changes to the original project. The first release is text based; it does not include voice listening or bundled messaging connectors.
+The graphical computers use Docker containers sharing the host kernel, not virtual machines. Each has a private internal network with no outbound internet and a loopback display relay for the local GUI. The existing exact-command network approval applies to agent command execution separately. Agents use file and command tools, including commands that launch graphical apps; automated screenshot, mouse and keyboard tools are not included. All computation is local and requires the workstation to be awake. Review a task's diff before applying project changes. This release uses text interaction and does not include voice listening or bundled messaging connectors.
 
 ## Interface preview
 
-These screenshots use an isolated test project with real file edits and recorded UI state. The model is a deterministic test fixture.
+These screenshots use isolated test state and a deterministic model fixture. The computer screenshot shows an authenticated, running Ubuntu/Xfce desktop; GUI keyboard input created a file that the Dot file API read back. The coding preview contains real edits in the isolated test project.
 
-![Chat interface](artifacts/screenshots/chat.png)
+![Dot conversation, identity and actual output files](artifacts/screenshots/pet-chat.png)
+
+![Live graphical Ubuntu computer](artifacts/screenshots/computer.png)
 
 ![Coding workspace and reviewable diff](artifacts/screenshots/coding.png)
 
@@ -53,16 +61,17 @@ These screenshots use an isolated test project with real file edits and recorded
 npm run typecheck
 npm run build
 npm run test:all
-npm run test:gui
+CIT_TEST_DESKTOP=1 npm run test:gui
 ```
 
-`test:all` includes actual Docker execution and the production Eve runtime. Build the sandbox and application first. For browser tests, set `CIT_CHROMIUM_PATH` to your Chromium executable or use `npx playwright install chromium` and leave it unset. See [verification](docs/verification.md) for the test boundaries.
+`test:all` includes actual Docker desktops and command execution plus the production Eve runtime. Build both Docker images and the application first. Tests run serially to limit peak disk usage. For browser tests, set `CIT_CHROMIUM_PATH` to your Chromium executable or use `npx playwright install chromium` and leave it unset. See [verification](docs/verification.md) for the test boundaries.
 
-The full suite passed **44 of 44 tests with no skips**, including production Eve, a deterministic local provider and real Docker execution. Type checking, the production build and GUI tests also passed.
+On **October 7, 2026**, the full suite passed **81 of 81 tests with no skips**, using production Eve, actual Docker desktops/commands and a deterministic local provider. The desktop-enabled GUI suite passed **3 of 3 tests**, including real noVNC authentication and keyboard input. Type checking, the production build and formatting checks also passed. See the verification guide for the measured scope and remaining workstation checks.
 
 ## Read more
 
 - [Architecture and delivery plan](docs/architecture.md)
+- [Official Dots/Muse research and CIT Dots policy](docs/dots-research.md)
 - [Ubuntu setup](docs/setup.md)
 - [Ollama and LM Studio](docs/local-models.md)
 - [Hardware sizing and two-GPU options](docs/hardware.md)

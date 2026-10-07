@@ -149,11 +149,24 @@ export function useLocal() {
   };
 }
 
-export function useDetail<T>(path: string | null, revision: number) {
+export function useDetail<T>(
+  path: string | null,
+  revision: number,
+  pollMs = 0,
+) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pollRevision, setPollRevision] = useState(0);
   const currentPath = useRef<string | null>(null);
+  useEffect(() => {
+    if (!path || !pollMs) return;
+    const timer = setInterval(
+      () => setPollRevision((value) => value + 1),
+      pollMs,
+    );
+    return () => clearInterval(timer);
+  }, [path, pollMs]);
   useEffect(() => {
     if (!path) {
       setData(null);
@@ -182,7 +195,7 @@ export function useDetail<T>(path: string | null, revision: number) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [path, revision]);
+  }, [path, revision, pollRevision]);
   return { data, error, loading };
 }
 

@@ -26,6 +26,12 @@ Long context windows and parallel requests consume additional KV cache. Ollama d
 
 System RAM supports repositories, indexing, build jobs and CPU fallback. CPU fallback can keep a model runnable but may change latency substantially. Free disk space must also accommodate model downloads, caches, Docker images, generated workspaces and a backup outside the primary data directory.
 
+## Resources for each Dot computer
+
+Each running Ubuntu/Xfce desktop adds CPU and system-RAM use, browser processes and persistent disk files. The graphical containers use software display streaming and receive no GPU devices; inference runs in the separate local model service. Adding a Dot does not require another model copy, but additional simultaneous model requests still consume inference capacity.
+
+The desktops share an OS image and the host kernel. Keep their per-container resource limits and the global task/inference limits conservative until actual browser and coding workloads are measured. Stop unused desktops to release running-process resources without deleting their owned files. Nothing local continues computing while the workstation is suspended or powered off.
+
 ## Ubuntu 26.04 and CUDA
 
 Install a driver supported by the exact card and Ubuntu kernel. Verify the installed driver with `nvidia-smi` before adding a model server. If using GPU containers, verify NVIDIA Container Toolkit passthrough separately; Docker availability alone does not establish CUDA availability.
@@ -43,6 +49,7 @@ Current vLLM documentation supports Python 3.10–3.13 and describes default CUD
 5. Measure peak GPU memory, prefill time and response latency at the configured context and concurrency limit.
 6. Exercise cancellation, model-server failure, GUI closure and service restart.
 7. After configuring startup, reboot and confirm stored tasks, messages and local memory remain available.
+8. Start two Dot desktops, verify distinct private files, and measure RAM/CPU use while a representative agent task runs. Stop/restart a desktop and confirm its persistent files remain.
 
 Record results for each tested profile. This project does not supply unmeasured token-per-second claims or promise that arbitrary models work.
 

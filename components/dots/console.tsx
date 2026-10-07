@@ -15,6 +15,7 @@ import {
   CirclePause,
   CirclePlay,
   Code2,
+  Computer,
   Cpu,
   Folder,
   Inbox,
@@ -32,7 +33,16 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { Approval, Task } from "@/src/shared/types";
+import type { Approval, Session, Task } from "@/src/shared/types";
+import {
+  activeDot as resolveDot,
+  dotSnapshot,
+  independentSnapshot,
+  ownerId,
+} from "./identity";
+import { DotIdentityCard, DotsView } from "./companions";
+import { ComputerView } from "./computer";
+import { PetAvatar } from "./pet";
 import {
   localApi,
   useDetail,
@@ -53,6 +63,9 @@ import {
 } from "./views";
 
 export type Section =
+  | "dots"
+  | "computer"
+  | "work"
   | "chat"
   | "projects"
   | "goals"
@@ -62,6 +75,8 @@ export type Section =
   | "settings"
   | "task";
 const navigation = [
+  { key: "dots", label: "Your Dots", icon: Sparkles },
+  { key: "computer", label: "Computer", icon: Computer },
   { key: "chat", label: "Chat", icon: MessageSquare },
   { key: "projects", label: "Projects", icon: Folder },
   { key: "goals", label: "Goals", icon: CirclePlay },
@@ -76,23 +91,55 @@ export function DotsConsole({
   sessionId,
   taskId,
   projectId,
+  dotId,
 }: {
   section?: Section;
   sessionId?: string;
   taskId?: string;
   projectId?: string;
+  dotId?: string;
 }) {
   const state = useLocal();
-  const { snapshot, connection } = state;
+  const { snapshot: fullSnapshot, connection } = state;
   const router = useRouter();
   const [navOpen, setNavOpen] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(Boolean(dotId || taskId));
+  const [newChatKey, setNewChatKey] = useState(0);
   const [chosenTask, setChosenTask] = useState<string | null>(null);
+  const canonical = useDetail<Session>(
+    dotId && section === "chat" ? `/dots/${dotId}/session` : null,
+    0,
+  );
+  const effectiveSessionId = sessionId ?? canonical.data?.id;
   const selectedTaskId = taskId ?? chosenTask;
   const detail = useDetail<TaskDetail>(
     selectedTaskId ? `/tasks/${selectedTaskId}` : null,
-    snapshot?.eventsCursor ?? 0,
+    fullSnapshot?.eventsCursor ?? 0,
   );
+  const session =
+    fullSnapshot?.sessions.find((item) => item.id === effectiveSessionId) ??
+    canonical.data;
+  const taskOwner = taskId
+    ? ownerId(
+        detail.data?.task ??
+          fullSnapshot?.tasks.find((item) => item.id === taskId),
+      )
+    : undefined;
+  const contextOwner = dotId ?? (session ? ownerId(session) : taskOwner);
+  const dot = fullSnapshot
+    ? contextOwner
+      ? resolveDot(fullSnapshot, contextOwner)
+      : ["dots", "computer", "goals", "memory"].includes(section)
+        ? resolveDot(fullSnapshot)
+        : undefined
+    : undefined;
+  const snapshot = fullSnapshot
+    ? dot
+      ? dotSnapshot(fullSnapshot, dot.id)
+      : independentSnapshot(fullSnapshot, effectiveSessionId)
+    : null;
+  const recentSessions =
+    fullSnapshot?.sessions.filter((item) => ownerId(item) === null) ?? [];
   const unread = snapshot?.inbox.filter((item) => !item.read).length ?? 0;
   const active =
     snapshot?.tasks.filter((task) =>
@@ -100,20 +147,32 @@ export function DotsConsole({
         task.status,
       ),
     ) ?? [];
-  const currentSession = snapshot?.sessions.find(
-    (session) => session.id === sessionId,
-  );
+  const currentSession = session;
   const title =
     section === "task"
       ? (detail.data?.task.title ?? "Coding workspace")
-      : sessionId
-        ? (currentSession?.title ?? "Conversation")
-        : (navigation.find((item) => item.key === section)?.label ?? "Chat");
+      : dot && section === "chat"
+        ? dot.name
+        : section === "work"
+          ? "New work session"
+          : effectiveSessionId
+            ? (currentSession?.title ?? "Conversation")
+            : (navigation.find((item) => item.key === section)?.label ??
+              "Chat");
   const theme = snapshot?.settings.theme ?? "dark";
   useEffect(() => {
-    if (window.matchMedia("(max-width: 960px)").matches)
-      setInspectorOpen(false);
-  }, []);
+    setInspectorOpen(
+      !window.matchMedia("(max-width: 960px)").matches &&
+        Boolean(dot || taskId),
+    );
+  }, [dot?.id, taskId]);
+  const openDot = (id: string) => {
+    void state.run(async () => {
+      await localApi("/settings", "PATCH", { selectedDotId: id });
+      setNavOpen(false);
+      router.push(`/dots/${id}`);
+    });
+  };
 
   return (
     <div className="dots-console" data-theme={theme}>
@@ -159,19 +218,48 @@ export function DotsConsole({
             <X size={17} />
           </button>
         </div>
-        <Link
-          href="/chat"
-          className="new-chat"
-          onClick={() => setNavOpen(false)}
-        >
-          <Plus size={17} />
-          New conversation
-        </Link>
+        {fullSnapshot?.dots?.length ? (
+          <div className="sidebar-dots">
+            <div className="sidebar-label">
+              <span>Your companions</span>
+              <Link href="/dots?add=1" aria-label="Add another Dot">
+                <Plus size={13} />
+              </Link>
+            </div>
+            <nav aria-label="Your Dots">
+              {fullSnapshot.dots.map((item) => (
+                <button
+                  className={`sidebar-dot ${dot?.id === item.id ? "is-active" : ""}`}
+                  key={item.id}
+                  aria-label={`Open ${item.name}`}
+                  aria-pressed={dot?.id === item.id}
+                  disabled={state.busy}
+                  onClick={() => openDot(item.id)}
+                >
+                  <PetAvatar dot={item} />
+                  <span>{item.name}</span>
+                  {item.isPrimary ? (
+                    <span className="sidebar-primary" title="Your first Dot">
+                      ✦
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </nav>
+          </div>
+        ) : null}
         <nav className="primary-nav">
           {navigation.map((item) => (
             <Link
               key={item.key}
-              href={`/${item.key}`}
+              href={
+                dot &&
+                ["chat", "computer", "goals", "memory", "inbox"].includes(
+                  item.key,
+                )
+                  ? `/dots/${dot.id}${item.key === "chat" ? "" : `/${item.key}`}`
+                  : `/${item.key}`
+              }
               className={`nav-item ${section === item.key ? "is-active" : ""}`}
               aria-current={section === item.key ? "page" : undefined}
               onClick={() => setNavOpen(false)}
@@ -189,15 +277,19 @@ export function DotsConsole({
         </nav>
         <div className="sidebar-recents">
           <div className="sidebar-label">Recent conversations</div>
-          {snapshot?.sessions.length ? (
-            snapshot.sessions.slice(0, 8).map((session) => (
+          {recentSessions.length ? (
+            recentSessions.slice(0, 8).map((session) => (
               <Link
-                className={`recent-item ${sessionId === session.id ? "is-active" : ""}`}
+                className={`recent-item ${effectiveSessionId === session.id ? "is-active" : ""}`}
                 key={session.id}
                 href={`/sessions/${session.id}`}
                 onClick={() => setNavOpen(false)}
               >
-                <MessageSquare size={14} />
+                {session.kind === "work" ? (
+                  <Code2 size={14} />
+                ) : (
+                  <MessageSquare size={14} />
+                )}
                 <span>{session.title}</span>
               </Link>
             ))
@@ -270,6 +362,17 @@ export function DotsConsole({
             <span>{title}</span>
           </div>
           <div className="header-actions">
+            <Link
+              className="button header-new-chat"
+              href="/chat"
+              onClick={() => {
+                setNewChatKey((value) => value + 1);
+                setChosenTask(null);
+              }}
+            >
+              <Plus size={14} />
+              New chat
+            </Link>
             <span className="local-badge">
               <ShieldCheck size={12} />
               Local first
@@ -327,14 +430,39 @@ export function DotsConsole({
         <div className="workspace-body">
           <main id="main-content" className="dots-main" tabIndex={-1}>
             {snapshot ? (
-              section === "chat" ? (
-                <ChatView
-                  key={sessionId ?? "new"}
-                  state={state}
-                  snapshot={snapshot}
-                  sessionId={sessionId}
-                  selectTask={setChosenTask}
-                />
+              section === "dots" ? (
+                <DotsView state={state} snapshot={fullSnapshot!} />
+              ) : section === "computer" ? (
+                dot ? (
+                  <ComputerView
+                    key={dot.id}
+                    state={state}
+                    snapshot={snapshot}
+                    dot={dot}
+                  />
+                ) : (
+                  <div className="loading-row">This Dot is unavailable.</div>
+                )
+              ) : section === "chat" || section === "work" ? (
+                dotId && !canonical.data ? (
+                  <div className="loading-row">
+                    {canonical.error ?? "Opening the Dot's conversation…"}
+                  </div>
+                ) : (
+                  <ChatView
+                    key={`${effectiveSessionId ?? "new"}-${newChatKey}-${section}`}
+                    state={state}
+                    snapshot={snapshot}
+                    sessionId={effectiveSessionId}
+                    dot={dot}
+                    kind={
+                      currentSession?.kind === "work" || section === "work"
+                        ? "work"
+                        : "chat"
+                    }
+                    selectTask={setChosenTask}
+                  />
+                )
               ) : section === "projects" ? (
                 <ProjectsView
                   state={state}
@@ -348,7 +476,7 @@ export function DotsConsole({
               ) : section === "models" ? (
                 <ModelsView state={state} snapshot={snapshot} />
               ) : section === "memory" ? (
-                <MemoryView state={state} snapshot={snapshot} />
+                <MemoryView state={state} snapshot={fullSnapshot!} dot={dot} />
               ) : section === "settings" ? (
                 <SettingsView state={state} snapshot={snapshot} />
               ) : (
@@ -408,24 +536,33 @@ export function DotsConsole({
                 </button>
               </div>
               {snapshot ? (
-                <ActivityPanel
-                  state={state}
-                  snapshot={snapshot}
-                  active={active}
-                  selected={detail.data}
-                  selectedError={detail.error}
-                  selectTask={(id) => {
-                    if (taskId) router.push(`/tasks/${id}`);
-                    else setChosenTask(id);
-                  }}
-                  clearTask={() => {
-                    if (taskId)
-                      router.push(
-                        `/sessions/${detail.data?.task.sessionId ?? ""}`,
-                      );
-                    else setChosenTask(null);
-                  }}
-                />
+                <>
+                  {dot ? (
+                    <DotIdentityCard
+                      state={state}
+                      snapshot={snapshot}
+                      dot={dot}
+                    />
+                  ) : null}
+                  <ActivityPanel
+                    state={state}
+                    snapshot={snapshot}
+                    active={active}
+                    selected={detail.data}
+                    selectedError={detail.error}
+                    selectTask={(id) => {
+                      if (taskId) router.push(`/tasks/${id}`);
+                      else setChosenTask(id);
+                    }}
+                    clearTask={() => {
+                      if (taskId)
+                        router.push(
+                          `/sessions/${detail.data?.task.sessionId ?? ""}`,
+                        );
+                      else setChosenTask(null);
+                    }}
+                  />
+                </>
               ) : (
                 <p className="panel-description">
                   Activity appears when the service connects.

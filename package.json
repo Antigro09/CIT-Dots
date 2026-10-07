@@ -22,7 +22,7 @@
     "test:gui": "playwright test tests/gui.spec.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test:all": "CIT_TEST_DOCKER=1 CIT_TEST_EVE=1 npm test"
+    "test:all": "CIT_TEST_DOCKER=1 CIT_TEST_EVE=1 CIT_TEST_DESKTOP=1 node --import tsx --test --test-concurrency=1 tests/*.test.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "3.0.65",

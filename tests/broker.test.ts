@@ -699,14 +699,22 @@ test("scheduled work runs without a chat prompt and creates proactive inbox resu
       snapshot.tasks.filter((task) => task.goalId === goal.id).length,
       1,
     );
+    const goalTask = snapshot.tasks.find((task) => task.goalId === goal.id)!;
+    const mainSessionId = snapshot.dots.find(
+      (dot) => dot.id === goalTask.dotId,
+    )?.sessionId;
+    assert.ok(
+      mainSessionId,
+      "background updates open the Dot's main conversation",
+    );
     assert.ok(
       snapshot.inbox.some(
-        (item) => item.kind === "progress" && item.sessionId === goal.sessionId,
+        (item) => item.kind === "progress" && item.sessionId === mainSessionId,
       ),
     );
     assert.ok(
       snapshot.inbox.some(
-        (item) => item.kind === "result" && item.sessionId === goal.sessionId,
+        (item) => item.kind === "result" && item.sessionId === mainSessionId,
       ),
     );
     for (let count = 0; count < 3; count++) await f.broker.tick();
@@ -717,7 +725,7 @@ test("scheduled work runs without a chat prompt and creates proactive inbox resu
       "occurrence is not repeated",
     );
     const transcript = await f.request<{ messages: { role: string }[] }>(
-      `/sessions/${goal.sessionId}`,
+      `/sessions/${mainSessionId}`,
     );
     assert.equal(
       transcript.messages.filter((message) => message.role === "user").length,
