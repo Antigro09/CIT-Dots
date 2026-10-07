@@ -1,0 +1,19 @@
+[Unit]
+Description=CIT Dots local control service
+Wants=cit-dots-eve.service
+After=cit-dots-eve.service
+PartOf=cit-dots.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+Environment="PATH=@NODE_BIN@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=@NODE@ @LAUNCHER@ broker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=cit-dots.target

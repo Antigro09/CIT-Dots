@@ -1,0 +1,17 @@
+[Unit]
+Description=CIT Dots Eve worker
+PartOf=cit-dots.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+Environment="PATH=@NODE_BIN@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=@NODE@ @LAUNCHER@ eve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=cit-dots.target

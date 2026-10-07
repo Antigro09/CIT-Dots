@@ -1,0 +1,72 @@
+{
+  "name": "cit-dots",
+  "version": "0.1.0",
+  "type": "module",
+  "imports": {
+    "#*": "./agent/*",
+    "#evals/*": "./evals/*"
+  },
+  "scripts": {
+    "dev": "concurrently --kill-others -n broker,worker,web \"npm:dev:broker\" \"npm:dev:eve\" \"npm:dev:web\"",
+    "dev:web": "next dev --hostname 127.0.0.1 --port 3000",
+    "dev:broker": "tsx watch src/server/main.ts",
+    "dev:eve": "eve dev --no-ui --host 127.0.0.1 --port 4319",
+    "build": "npm run build:eve && next build",
+    "build:eve": "eve build",
+    "start": "concurrently --kill-others -n broker,worker,web \"npm:start:broker\" \"npm:start:eve\" \"npm:start:web\"",
+    "start:web": "next start --hostname 127.0.0.1 --port 3000",
+    "start:broker": "tsx src/server/main.ts",
+    "start:eve": "eve start --host 127.0.0.1 --port 4319",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:gui": "playwright test tests/gui.spec.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:all": "CIT_TEST_DOCKER=1 CIT_TEST_EVE=1 npm test"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "3.0.65",
+    "@radix-ui/react-use-controllable-state": "1.2.2",
+    "@shikijs/core": "3.23.0",
+    "@shikijs/engine-javascript": "3.23.0",
+    "@shikijs/engine-oniguruma": "3.23.0",
+    "@streamdown/cjk": "1.0.3",
+    "@streamdown/code": "1.1.1",
+    "@streamdown/math": "1.0.2",
+    "@streamdown/mermaid": "1.0.2",
+    "@tailwindcss/postcss": "4.3.0",
+    "ai": "7.0.128",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "cmdk": "1.1.1",
+    "croner": "10.0.1",
+    "eve": "0.72.0",
+    "fastify": "5.12.5",
+    "lucide-react": "1.16.0",
+    "motion": "12.40.0",
+    "nanoid": "5.1.11",
+    "next": "16.3.4",
+    "radix-ui": "1.4.3",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "shiki": "3.23.0",
+    "streamdown": "2.5.0",
+    "tailwind-merge": "3.6.0",
+    "tailwindcss": "4.3.0",
+    "use-stick-to-bottom": "1.1.4",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.x",
+    "@types/react": "19.2.15",
+    "@types/react-dom": "19.2.3",
+    "concurrently": "10.0.5",
+    "prettier": "3.9.9",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": "24.x"
+  }
+}

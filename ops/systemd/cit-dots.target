@@ -1,0 +1,7 @@
+[Unit]
+Description=CIT Dots local assistant
+Wants=cit-dots-eve.service cit-dots-broker.service cit-dots-web.service
+After=network.target
+
+[Install]
+WantedBy=default.target

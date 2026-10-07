@@ -1,0 +1,19 @@
+[Unit]
+Description=CIT Dots local web interface
+Wants=cit-dots-broker.service
+After=cit-dots-broker.service
+PartOf=cit-dots.target
+
+[Service]
+Type=simple
+WorkingDirectory=@PROJECT_ROOT@
+Environment="PATH=@NODE_BIN@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=@NODE@ @LAUNCHER@ web
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=cit-dots.target
