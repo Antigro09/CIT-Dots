@@ -1,5 +1,8 @@
 import type { ModelProfile } from "../shared/types";
 
+const VISION_PROBE_IMAGE =
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC";
+
 export function validateBaseUrl(value: string): string {
   const url = new URL(value);
   if (
@@ -121,12 +124,57 @@ export async function probeModel(
       } catch {}
     if (!streaming)
       throw new Error("Server did not return a supported streaming response.");
+    let vision = false;
+    let visionError = "";
+    if (profile.visionEnabled) {
+      try {
+        const check = await fetch(`${profile.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(90000),
+          redirect: "error",
+          body: JSON.stringify({
+            model: profile.modelId,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: "What is the main color of this image? Reply with only the color name.",
+                  },
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${VISION_PROBE_IMAGE}`,
+                    },
+                  },
+                ],
+              },
+            ],
+            max_tokens: 32,
+            stream: false,
+          }),
+        });
+        if (!check.ok)
+          throw new Error(`Image request returned ${check.status}.`);
+        const result = (await check.json()) as {
+          choices?: { message?: { content?: unknown } }[];
+        };
+        const answer = result.choices?.[0]?.message?.content;
+        vision = typeof answer === "string" && /\bred\b/i.test(answer);
+        if (!vision)
+          throw new Error("The model did not identify the test image's color.");
+      } catch (error) {
+        visionError = `Screenshot test did not pass: ${(error as Error).message}`;
+      }
+    }
     return {
       status: "ready",
-      capabilities: { streaming, tools },
+      capabilities: { streaming, tools, vision },
       lastCheckedAt: new Date().toISOString(),
       error: tools
-        ? ""
+        ? visionError
         : "This model can chat, but its tool-call test did not pass.",
     };
   } catch (error) {

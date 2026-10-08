@@ -3345,6 +3345,34 @@ summary {
   border: 0;
   background: #111;
 }
+.desktop-viewport {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 300px;
+  min-width: 0;
+  overflow: hidden;
+  background: #111;
+}
+.desktop-viewport:fullscreen {
+  width: 100vw;
+  height: 100vh;
+}
+.desktop-viewport iframe {
+  height: 100%;
+}
+.desktop-viewport.agent-control iframe {
+  pointer-events: none;
+}
+.desktop-watch-shield {
+  position: absolute;
+  inset: 0;
+  cursor: default;
+}
+.desktop-display-actions > .button {
+  gap: 5px;
+  margin-right: 5px;
+}
 .desktop-caption {
   background: var(--panel);
   display: flex;

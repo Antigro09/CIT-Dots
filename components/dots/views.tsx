@@ -1328,6 +1328,11 @@ export function ModelsView({ state, snapshot }: ViewProps) {
                   {model.maxOutputTokens.toLocaleString()} tokens
                 </span>
               </div>
+              {model.capabilities?.vision && model.capabilities.tools ? (
+                <p className="form-hint">
+                  Screenshots verified for computer tasks
+                </p>
+              ) : null}
               {model.error ? (
                 <p className="inline-error">{model.error}</p>
               ) : null}
@@ -1448,6 +1453,7 @@ function ModelForm({
           contextWindow: Number(form.get("contextWindow")),
           maxOutputTokens: Number(form.get("maxOutputTokens")),
           temperature: Number(form.get("temperature")),
+          visionEnabled: form.get("visionEnabled") === "on",
         };
         void state.run(async () => {
           await localApi(
@@ -1551,6 +1557,18 @@ function ModelForm({
           Model ID field.
         </p>
       ) : null}
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          name="visionEnabled"
+          defaultChecked={model?.visionEnabled ?? false}
+        />
+        Use screenshots for computer tasks
+      </label>
+      <p className="form-hint">
+        Requires a local model that accepts images and tool calls. Check
+        connection to test it.
+      </p>
       <details className="advanced-options">
         <summary>Generation settings</summary>
         <div className="form-grid">

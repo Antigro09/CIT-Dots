@@ -30,7 +30,8 @@ export interface ModelProfile extends BaseRecord {
   contextWindow: number;
   maxOutputTokens: number;
   temperature: number;
-  capabilities?: { streaming: boolean; tools: boolean };
+  visionEnabled?: boolean;
+  capabilities?: { streaming: boolean; tools: boolean; vision?: boolean };
   lastCheckedAt?: string;
   status?: "unknown" | "ready" | "error";
   error?: string;

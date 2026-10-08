@@ -6,11 +6,34 @@ import net from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 import { computerUser, ensureComputer, type Computer } from "./computers";
+import {
+  computerActionSchema,
+  type ComputerAction,
+  type ComputerControlMode,
+  type ComputerControlStatus,
+  type ComputerCursor,
+  type ComputerResult,
+} from "../shared/computer";
+import {
+  cancelComputerAction,
+  computerActionId,
+  computerCursor,
+  runComputerAction,
+} from "./computer-control";
 
 const exec = promisify(execFile);
 const OS = "Ubuntu 26.04" as const;
 const DEFAULT_IMAGE = "cit-dots-desktop:latest";
 const pending = new Map<string, Promise<unknown>>();
+const activeActions = new Map<
+  string,
+  {
+    controller: AbortController;
+    jobId: string;
+    finished: Promise<void>;
+    mutates: boolean;
+  }
+>();
 const relays = new Map<
   string,
   { target: string; port: number; server: net.Server; sockets: Set<net.Socket> }
@@ -33,6 +56,12 @@ interface DesktopMetadata {
   dotId: string;
   owner: string;
   password: string;
+}
+
+interface ControlMetadata extends ComputerControlStatus {
+  dotId: string;
+  owner: string;
+  pendingJobId?: string;
 }
 
 interface ContainerInfo {
@@ -298,6 +327,7 @@ export class DesktopManager {
   private readonly owner: string;
   private readonly configuredImage: string | (() => string);
   private readonly relayKeys = new Set<string>();
+  private readonly actionKeys = new Set<string>();
 
   constructor(options: DesktopManagerOptions) {
     this.dataDir = path.resolve(options.dataDir);
@@ -307,6 +337,12 @@ export class DesktopManager {
 
   /** Release the broker's display connections while preserving guest computers. */
   async close(): Promise<void> {
+    const actions = [...this.actionKeys]
+      .map((key) => activeActions.get(key))
+      .filter((action) => action !== undefined);
+    for (const action of actions) action.controller.abort();
+    await Promise.allSettled(actions.map((action) => action.finished));
+    this.actionKeys.clear();
     for (const key of relays.keys()) {
       // Container names encode both data-directory owner and Dot ID.
       const relay = relays.get(key);
@@ -570,6 +606,239 @@ export class DesktopManager {
     return info?.State.Running && info.State.Health?.Status === "healthy"
       ? desktopContainerName(this.dataDir, dotId)
       : null;
+  }
+
+  private async control(
+    computer: Computer,
+    create = true,
+  ): Promise<ControlMetadata> {
+    const directory = this.metadataDirectory(computer);
+    await realDirectory(directory);
+    const filename = path.join(directory, "control.json");
+    const raw = await readPrivate(filename);
+    if (raw !== null) {
+      let metadata: ControlMetadata;
+      try {
+        metadata = JSON.parse(raw) as ControlMetadata;
+      } catch {
+        throw new Error(
+          "Desktop control metadata is damaged. Restore its private state.",
+        );
+      }
+      if (
+        metadata.dotId !== computer.dotId ||
+        metadata.owner !== this.owner ||
+        !["agent", "human"].includes(metadata.mode) ||
+        typeof metadata.updatedAt !== "string" ||
+        Number.isNaN(Date.parse(metadata.updatedAt)) ||
+        (metadata.pending !== undefined &&
+          typeof metadata.pending !== "boolean") ||
+        (metadata.pendingJobId !== undefined &&
+          !/^[a-f0-9]{32}$/.test(metadata.pendingJobId))
+      )
+        throw new Error("Desktop control ownership does not match this Dot.");
+      return metadata;
+    }
+    const metadata: ControlMetadata = {
+      dotId: computer.dotId,
+      owner: this.owner,
+      mode: "agent",
+      updatedAt: new Date().toISOString(),
+    };
+    if (create) await writePrivate(filename, JSON.stringify(metadata));
+    return metadata;
+  }
+
+  /** Trusted host state is outside all guest mounts and survives broker restarts. */
+  private async inputControlStatus(
+    dotId: string,
+  ): Promise<ComputerControlStatus> {
+    validateId(dotId);
+    return exclusive(
+      `${desktopContainerName(this.dataDir, dotId)}:control`,
+      async () => {
+        const control = await this.control(
+          await ensureComputer(this.dataDir, dotId),
+        );
+        return {
+          mode: control.mode,
+          updatedAt: control.updatedAt,
+          ...(control.pending ? { pending: true } : {}),
+        };
+      },
+    );
+  }
+
+  /** Public ownership waits for the complete takeover barrier. Input admission
+   * uses the private metadata lock instead, avoiding a cancellation deadlock. */
+  async controlStatus(dotId: string): Promise<ComputerControlStatus> {
+    validateId(dotId);
+    return exclusive(
+      `${desktopContainerName(this.dataDir, dotId)}:control-change`,
+      () => this.inputControlStatus(dotId),
+    );
+  }
+
+  /** Human takeover aborts a current input sequence before granting the viewer
+   * keyboard/mouse access. Workers cannot change this mode through their tool. */
+  async setControl(
+    dotId: string,
+    mode: ComputerControlMode,
+  ): Promise<ComputerControlStatus> {
+    validateId(dotId);
+    if (mode !== "agent" && mode !== "human")
+      throw new Error("Invalid desktop control mode.");
+    const key = desktopContainerName(this.dataDir, dotId);
+    // Include guest cancellation in this lock: a later "give back" request must
+    // not finish while an earlier takeover is still stopping synthetic input.
+    return exclusive(`${key}:control-change`, async () => {
+      const computer = await ensureComputer(this.dataDir, dotId);
+      const filename = path.join(
+        this.metadataDirectory(computer),
+        "control.json",
+      );
+      const transition = await exclusive(`${key}:control`, async () => {
+        const previous = await this.control(computer);
+        const active = activeActions.get(key);
+        const input = active?.mutates ? active : undefined;
+        const pendingJobId =
+          previous.pendingJobId ??
+          (mode === "human" ? input?.jobId : undefined);
+        if (mode === "human") input?.controller.abort();
+        if (mode === "human" || previous.pending) {
+          await writePrivate(
+            filename,
+            JSON.stringify({
+              ...previous,
+              mode: "human",
+              pending: true,
+              pendingJobId,
+              updatedAt: new Date(
+                Math.max(Date.now(), Date.parse(previous.updatedAt) + 1),
+              ).toISOString(),
+            }),
+          );
+        }
+        return { previous, input, pendingJobId };
+      });
+      if (mode === "human") await transition.input?.finished;
+      const jobs = new Set(
+        [
+          transition.pendingJobId,
+          mode === "human" ? transition.input?.jobId : undefined,
+        ].filter((jobId) => jobId !== undefined),
+      );
+      if (jobs.size) {
+        const info = await this.ownedContainer(computer);
+        // A stopped guest has no live injected input; its tmpfs is fresh on start.
+        if (info?.State.Running) {
+          for (const jobId of jobs) await cancelComputerAction(info.Id, jobId);
+        }
+      }
+      // Cleanup failure leaves persisted human+pending state. Future ownership
+      // changes retry that exact job; neither workers nor viewers get input yet.
+      return exclusive(`${key}:control`, async () => {
+        const current = await this.control(computer);
+        const settled: ControlMetadata = {
+          ...current,
+          mode,
+          pending: false,
+          updatedAt: new Date(
+            Math.max(Date.now(), Date.parse(current.updatedAt) + 1),
+          ).toISOString(),
+        };
+        delete settled.pendingJobId;
+        await writePrivate(filename, JSON.stringify(settled));
+        return { mode: settled.mode, updatedAt: settled.updatedAt };
+      });
+    });
+  }
+
+  /** Read the actual shared X pointer without waiting for a moving input action. */
+  async cursor(dotId: string): Promise<ComputerCursor | null> {
+    validateId(dotId);
+    const computer = await ensureComputer(this.dataDir, dotId);
+    const info = await this.ownedContainer(computer);
+    if (!info?.State.Running || info.State.Health?.Status !== "healthy")
+      return null;
+    return computerCursor(info.Id);
+  }
+
+  /** Input is serialized for this Dot, scoped to its owned healthy container,
+   * bounded in the guest, and canceled on takeover or task cancellation. */
+  async action(
+    dotId: string,
+    request: ComputerAction,
+    signal?: AbortSignal,
+    operationId?: string,
+  ): Promise<ComputerResult> {
+    validateId(dotId);
+    const input = computerActionSchema.parse(request);
+    if (
+      ("x" in input && input.x !== undefined) !==
+      ("y" in input && input.y !== undefined)
+    )
+      throw new Error("Pointer positions require both x and y.");
+    const key = desktopContainerName(this.dataDir, dotId);
+    return exclusive(`${key}:action`, async () => {
+      signal?.throwIfAborted();
+      const computer = await ensureComputer(this.dataDir, dotId);
+      const info = await this.ownedContainer(computer);
+      if (!info?.State.Running || info.State.Health?.Status !== "healthy")
+        throw new Error(
+          "Start this Dot's graphical desktop before using its computer.",
+        );
+      const controller = new AbortController();
+      const jobId = computerActionId(
+        operationId ?? randomBytes(16).toString("hex"),
+      );
+      let finish!: () => void;
+      const finished = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      // Register before reading the mode, closing the race with human takeover.
+      activeActions.set(key, {
+        controller,
+        jobId,
+        finished,
+        mutates: input.action !== "screenshot",
+      });
+      this.actionKeys.add(key);
+      try {
+        if (input.action !== "screenshot") {
+          const control = await this.inputControlStatus(dotId);
+          if (control.pending)
+            throw new Error(
+              "Computer input cleanup is pending. Resolve ownership before sending more input.",
+            );
+          if (control.mode !== "agent")
+            throw new Error(
+              "The user has control of this computer. Wait until they give control back.",
+            );
+        }
+        const combined = signal
+          ? AbortSignal.any([signal, controller.signal])
+          : controller.signal;
+        combined.throwIfAborted();
+        return await runComputerAction(info.Id, input, jobId, combined);
+      } finally {
+        if (activeActions.get(key)?.jobId === jobId) activeActions.delete(key);
+        finish();
+      }
+    });
+  }
+
+  /** Recovery cancels the exact in-guest action without stopping the desktop. */
+  async cancelAction(dotId: string, operationId?: string): Promise<void> {
+    validateId(dotId);
+    const key = desktopContainerName(this.dataDir, dotId);
+    const active = activeActions.get(key);
+    const jobId = operationId ? computerActionId(operationId) : active?.jobId;
+    if (!jobId) return;
+    if (active?.jobId === jobId) active.controller.abort();
+    const computer = await ensureComputer(this.dataDir, dotId);
+    const info = await this.ownedContainer(computer);
+    if (info?.State.Running) await cancelComputerAction(info.Id, jobId);
   }
 
   async start(dotId: string): Promise<DesktopStatus> {

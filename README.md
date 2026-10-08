@@ -35,6 +35,7 @@ See [the operations runbook](docs/runbook.md) for desktop notifications, startup
 
 - A permanent primary Dot plus removable additional Dots, each with its own name, personality, pet and saved work.
 - An interactive Ubuntu 26.04/Xfce computer per Dot, with a browser, terminal and file manager; its home, workspace and artifacts persist when stopped.
+- Graphical workers that observe screenshots and send real mouse/keyboard input, with a visible cursor and explicit human takeover.
 - One persistent Dot conversation with prose updates; implementation and code remain in worker sessions.
 - Independent chat and coding/work sessions without a Dot.
 - A parent coordinator that starts coding, investigation and review workers, then steers or queues follow-ups in their existing Work sessions.
@@ -44,7 +45,15 @@ See [the operations runbook](docs/runbook.md) for desktop notifications, startup
 - User-defined one-time, interval and cron goals, plus explicit local memories.
 - A durable notification inbox and an optional Ubuntu desktop bridge.
 
-The graphical computers use Docker containers sharing the host kernel, not virtual machines. Each has a private internal network with no outbound internet and a loopback display relay for the local GUI. The existing exact-command network approval applies to agent command execution separately. Agents use file and command tools, including commands that launch graphical apps; automated screenshot, mouse and keyboard tools are not included. All computation is local and requires the workstation to be awake. Review a task's diff before applying project changes. This release uses text interaction and does not include voice listening or bundled messaging connectors.
+The graphical computers use Docker containers sharing the host kernel, not virtual machines. Each has a private internal network with no outbound internet and a loopback display relay for the local GUI. Graphical tools do not grant browser internet access; the existing exact-command network approval applies separately. All computation requires the workstation to be awake. Review a task's diff before applying project changes. Interaction is text-based, without voice or bundled messaging connectors.
+
+## Watch graphical work and take control
+
+For graphical work, configure a local model that accepts both images and tool calls. In its model profile, enable **Use screenshots for computer tasks**, save it, and run **Check connection**. The check separately tests a harmless tool call and identification of a small red PNG. Both must pass for the worker; this is a compatibility check, not a benchmark of desktop navigation. Select that profile for the coding worker before starting new work. Existing workers retain their model snapshot.
+
+Open the Dot's Computer and start its desktop. You watch by default, with a cursor showing the actual desktop pointer position. **Take control** enables your mouse and keyboard after the broker stops that Dot's active graphical input and commands; further worker input and command runs remain blocked until you select **Give control back**. Investigator and reviewer workers can inspect screenshots; coder workers can move, click, drag, scroll, type and press keys. The parent Dot delegates these operations and continues speaking in prose.
+
+Workers follow a screenshot → action → fresh screenshot loop. The model receives only the latest bounded PNG, while screen bytes remain private to worker/tool state and are omitted from public events and activity results. A successful color/tool probe does not establish that the selected model can reliably navigate arbitrary applications. See [architecture](docs/architecture.md) for bounds and [operations](docs/runbook.md) for takeover and upgrade behavior.
 
 ## Interface preview
 
@@ -53,6 +62,8 @@ These screenshots use isolated test state and a deterministic model fixture. The
 ![Dot conversation, identity and actual output files](artifacts/screenshots/pet-chat.png)
 
 ![Live graphical Ubuntu computer](artifacts/screenshots/computer.png)
+
+![Worker cursor and human takeover](artifacts/screenshots/computer-agent.png)
 
 ![Coding workspace and reviewable diff](artifacts/screenshots/coding.png)
 
@@ -67,7 +78,7 @@ CIT_TEST_DESKTOP=1 npm run test:gui
 
 `test:all` includes actual Docker desktops and command execution plus the production Eve runtime. Build both Docker images and the application first. Tests run serially to limit peak disk usage. For browser tests, set `CIT_CHROMIUM_PATH` to your Chromium executable or use `npx playwright install chromium` and leave it unset. See [verification](docs/verification.md) for the test boundaries.
 
-On **October 7, 2026**, the full suite passed **105 of 105 tests with no skips**, using production Eve, actual Docker desktops/commands and a deterministic local provider. The desktop-enabled GUI suite passed **3 of 3 tests**, including real noVNC authentication and keyboard input. Type checking, the production build and formatting checks also passed. See the verification guide for the measured scope and remaining workstation checks.
+On **October 7, 2026**, the full suite passed **129 of 129 tests with no skips**, using production Eve, actual Docker desktops/commands and a deterministic local provider. The desktop-enabled GUI suite passed **3 of 3 tests**, including visible cursor movement, human takeover and real keyboard input from both user and worker. Type checking, the production build and formatting checks also passed. See the verification guide for the measured scope and remaining workstation checks.
 
 ## Read more
 

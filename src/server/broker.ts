@@ -31,6 +31,11 @@ import {
 import { DesktopManager, type DesktopStatus } from "./desktops";
 import { PRIMARY_DOT_ID } from "../shared/types";
 import { dotProse } from "../shared/dot-output";
+import {
+  computerActionSchema,
+  type ComputerControlMode,
+} from "../shared/computer";
+import { publicMedia } from "./public-media";
 import type {
   Dot,
   Settings,
@@ -94,7 +99,13 @@ export type WorkerClient = Pick<
 type DesktopClient = Pick<
   DesktopManager,
   "status" | "start" | "stop" | "remove" | "containerName"
-> & { close?: () => Promise<void> };
+> &
+  Partial<
+    Pick<
+      DesktopManager,
+      "action" | "cursor" | "controlStatus" | "setControl" | "cancelAction"
+    >
+  > & { close?: () => Promise<void> };
 type TaskInput = {
   dotId?: string | null;
   sessionId?: string;
@@ -127,6 +138,8 @@ export class Broker {
   private stopping = false;
   private controllers = new Map<string, AbortController>();
   private toolControllers = new Map<string, AbortController>();
+  private humanTakeovers = new Set<string>();
+  private controlChanges = new Map<string, Promise<unknown>>();
   private runners = new Map<string, Promise<void>>();
   private workspaceCreation = new Map<string, Promise<Task["workspace"]>>();
   private health = { broker: true, eve: false, docker: false };
@@ -385,6 +398,86 @@ export class Broker {
     this.dot(id);
     return createComputerWorkspace(this.config.dataDir, id, "computer-ui");
   }
+  async computerControlStatus(id: string) {
+    return this.withComputer(id, async () => {
+      if (!this.desktops.controlStatus)
+        throw new Error("Computer control is unavailable.");
+      // Other open viewers must wait for commands as well as mouse/key jobs to drain.
+      while (this.controlChanges.has(id)) await this.controlChanges.get(id);
+      const control = await this.desktops.controlStatus(id);
+      const position = await this.desktops.cursor?.(id);
+      const operations = this.store.list<ToolOperation>("tool_operations", {
+        predicate: (operation) =>
+          operation.toolName === "computer" &&
+          this.dotId(this.store.require<Task>("tasks", operation.taskId)) ===
+            id,
+      });
+      const active = operations.find(
+        (operation) => operation.status === "running",
+      );
+      const latest = operations[0];
+      return {
+        ...control,
+        mode: control.pending ? "agent" : control.mode,
+        ...(position
+          ? {
+              cursor: {
+                ...position.cursor,
+                width: position.width,
+                height: position.height,
+              },
+            }
+          : {}),
+        ...(active ? { activeTaskId: active.taskId } : {}),
+        ...(latest ? { lastAction: String(latest.input.action) } : {}),
+      };
+    });
+  }
+  async setComputerControl(id: string, mode: ComputerControlMode) {
+    const previous = this.controlChanges.get(id);
+    const run = this.withComputer(id, async () => {
+      await previous?.catch(() => {});
+      if (!this.desktops.setControl)
+        throw new Error("Computer control is unavailable.");
+      if (mode === "human") this.humanTakeovers.add(id);
+      try {
+        // Close admission first, then drain both graphical input and commands that can use DISPLAY.
+        const changed = this.desktops.setControl(id, mode);
+        if (mode === "human") {
+          const affected: Promise<unknown>[] = [];
+          for (const [operationId, controller] of this.toolControllers) {
+            const operation = this.store.get<ToolOperation>(
+              "tool_operations",
+              operationId,
+            );
+            const task =
+              operation && this.store.get<Task>("tasks", operation.taskId);
+            if (
+              task &&
+              this.dotId(task) === id &&
+              (operation?.toolName === "computer" ||
+                operation?.toolName === "run_command")
+            ) {
+              controller.abort();
+              const run = this.toolRuns.get(operationId);
+              if (run) affected.push(run);
+            }
+          }
+          await changed;
+          await Promise.allSettled(affected);
+        }
+        const status = await changed;
+        this.event("desktop.control", { dotId: id, ...status });
+        return status;
+      } finally {
+        if (mode === "human") this.humanTakeovers.delete(id);
+      }
+    }).finally(() => {
+      if (this.controlChanges.get(id) === run) this.controlChanges.delete(id);
+    });
+    this.controlChanges.set(id, run);
+    return run;
+  }
   settings(): Settings {
     return {
       ...defaultSettings,
@@ -421,10 +514,13 @@ export class Broker {
       data && typeof data === "object" && "pendingOutput" in data
         ? this.publicTask(data as Task)
         : data;
-    return this.store.event(type, visible, taskId);
+    return this.store.event(type, publicMedia(visible), taskId);
   }
   publicTask({ pendingOutput: _private, ...task }: Task): Task {
     return task;
+  }
+  publicOperation(operation: ToolOperation): ToolOperation {
+    return publicMedia(operation) as ToolOperation;
   }
   private isDotCoordinator(task: Task) {
     return (
@@ -442,6 +538,20 @@ export class Broker {
     )
       throw new Error(
         "Only the Dot parent can manage worker sessions and forward files.",
+      );
+    if (
+      toolName === "computer" &&
+      (this.dotId(task) === null ||
+        !task.parentId ||
+        task.role === "coordinator")
+    )
+      throw new Error("Computer tools require a delegated Dot worker.");
+    if (
+      toolName === "computer" &&
+      task.profileSnapshot.capabilities?.vision !== true
+    )
+      throw new Error(
+        "Computer tools require a local model that passed its vision test.",
       );
   }
   private ownedWorker(parent: Task, id: string) {
@@ -1019,6 +1129,19 @@ export class Broker {
     for (const operation of this.store.list<ToolOperation>("tool_operations", {
       predicate: (op) => op.status === "running",
     })) {
+      if (operation.toolName === "computer") {
+        const task = this.store.get<Task>("tasks", operation.taskId);
+        if (task && this.dotId(task) !== null)
+          await this.desktops
+            .cancelAction?.(this.dotId(task)!, operation.id)
+            .catch(() =>
+              this.event(
+                "tool.recovery.cleanup_failed",
+                { operationId: operation.id },
+                task.id,
+              ),
+            );
+      }
       if (operation.toolName === "run_command") {
         const task = this.store.get<Task>("tasks", operation.taskId);
         if (
@@ -1701,6 +1824,19 @@ export class Broker {
           const controller = new AbortController();
           this.toolControllers.set(operation.id, controller);
           try {
+            const control =
+              this.dotId(task) !== null && this.desktops.controlStatus
+                ? await this.desktops.controlStatus(this.dotId(task)!)
+                : null;
+            if (
+              this.dotId(task) !== null &&
+              (this.humanTakeovers.has(this.dotId(task)!) ||
+                control?.mode === "human" ||
+                control?.pending)
+            )
+              throw new Error(
+                "Human control is active; this Dot's command input is paused.",
+              );
             const workspace = await this.ensureWorkspace(task);
             if (terminal.has(this.store.require<Task>("tasks", task.id).status))
               controller.abort();
@@ -1734,6 +1870,33 @@ export class Broker {
                   containerName: desktopContainer,
                 })
               : await runCommand(options);
+          } finally {
+            this.toolControllers.delete(operation.id);
+          }
+          break;
+        }
+        case "computer": {
+          const action = computerActionSchema.parse(input);
+          if (
+            ["reviewer", "investigator"].includes(task.role) &&
+            action.action !== "screenshot"
+          )
+            throw new Error("This worker role has read-only computer access.");
+          if (!this.desktops.action)
+            throw new Error("Computer input is unavailable.");
+          const controller = new AbortController();
+          this.toolControllers.set(operation.id, controller);
+          try {
+            if (terminal.has(this.store.require<Task>("tasks", task.id).status))
+              controller.abort();
+            result = await this.withComputer(this.dotId(task)!, () =>
+              this.desktops.action!(
+                this.dotId(task)!,
+                action,
+                controller.signal,
+                operation.id,
+              ),
+            );
           } finally {
             this.toolControllers.delete(operation.id);
           }
@@ -2190,6 +2353,7 @@ export class Broker {
         contextWindow: task.profileSnapshot.contextWindow,
         maxOutputTokens: task.profileSnapshot.maxOutputTokens,
         temperature: task.profileSnapshot.temperature,
+        vision: task.profileSnapshot.capabilities?.vision === true,
       },
       messages: history,
       memory: memories,

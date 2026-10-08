@@ -34,6 +34,30 @@ Configure the model server's own startup independently, then reboot and confirm 
 
 Use Computer → Stop for each unneeded Dot desktop. Its home, workspace and artifacts remain on disk. Removing an extra Dot stops its work and computer before deleting its own records/files; independent chat/work sessions and original source projects remain. The primary Dot cannot be removed.
 
+## Watch a Dot computer and hand over control
+
+Start the selected Dot's computer, then open its Desktop tab. The default view lets you watch a worker's real screen and pointer without sending keyboard or mouse input. The visible Agent cursor uses the actual X11 pointer position, scaled to the viewer. Opening a second computer window does not grant a second owner; both views follow the same per-Dot control state.
+
+Select **Take control** to use the desktop yourself. The broker first stops that Dot's active graphical actions and command operations, then confirms human ownership and enables noVNC input. Further worker input and Dot-owned commands are blocked while you have control. This command gate also covers project commands that could affect the display. Workers can still inspect screenshots. Select **Give control back** when finished; interrupted input is not automatically replayed. If a worker needs another attempt, give it a follow-up in its existing session or ask the Dot to continue.
+
+Human ownership persists across broker restarts and closing the page; reopen the Dot's computer to return it. If the control connection becomes unavailable, the viewer disables human input until fresh confirmed state arrives. Global Pause, task cancellation, stopping a desktop and human takeover have different effects: takeover protects that Dot's display input without canceling its schedules or pausing other Dots.
+
+If interrupted input cannot be confirmed stopped, the viewer says **Input is paused · Try Take control again**. Both human and worker input stay blocked. Retry **Take control** to finish that handover, or stop and restart the desktop before returning control.
+
+For visual work, edit a model profile and enable **Use screenshots for computer tasks**, save it, then run **Check connection**. The server must stream a valid harmless tool call and accept a 64 × 64 red PNG whose color the model identifies. Assign the checked profile to the worker role. A Ready chat connection alone is insufficient; a failed tool-call check blocks workers, and a failed image check leaves graphical tools unavailable. Editing a profile clears its check results. Start a new worker after model changes because existing sessions retain their profile snapshot.
+
+A Dot parent keeps its prose conversation and delegates visual tasks. Coder workers can send mouse and keyboard input; investigator and reviewer workers can only capture screenshots. A worker should capture the current screen, perform a bounded action and capture again to verify the result. Ask it to check the actual saved file or application state when a screenshot alone cannot establish success. A passing color probe does not prove arbitrary GUI navigation or model quality.
+
+The default display is 1440 × 900. Capture rejects PNGs over 2 MiB, displays over 4096 pixels per side or displays over 12 million pixels. If capture fails, reduce the desktop resolution or simplify the visible screen, then request a fresh screenshot. Public events and activity results omit image bytes; private worker/tool and workflow records can retain visible screen content. The model proxy keeps only the latest PNG in each inference request, which does not delete earlier private records. The desktop's browser remains offline; Take control and graphical tools do not grant outbound internet access.
+
+When upgrading the desktop tooling, rebuild the image:
+
+```bash
+docker build -t cit-dots-desktop:latest -f desktop/Dockerfile .
+```
+
+Then use Computer → Stop and Start for each Dot to adopt the rebuilt image. The broker recreates a stopped container when its image changed, preserving that Dot's home, workspace and artifacts. Running computers are reattached intact until explicitly restarted.
+
 ## Ubuntu desktop notifications
 
 Install `libnotify-bin` to provide `notify-send`, then enable the bridge:

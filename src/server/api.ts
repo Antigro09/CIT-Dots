@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Cron } from "croner";
 import { Broker, defaultSettings } from "./broker";
 import { getConfig, internalToken, type AppConfig } from "./config";
+import { prepareModelImages } from "./model-images";
 import { listFiles, readFile, writeFile } from "./workspaces";
 import {
   discoverModels,
@@ -34,6 +35,7 @@ const modelInput = z.object({
   contextWindow: z.number().int().min(2048).max(1000000).default(16384),
   maxOutputTokens: z.number().int().min(64).max(65536).default(2048),
   temperature: z.number().min(0).max(2).default(0.4),
+  visionEnabled: z.boolean().default(false),
 });
 const settingsInput = z
   .object({
@@ -183,6 +185,18 @@ export function createApp(
   });
   app.get("/api/local/dots/:id/computer", (request) =>
     broker.computerStatus(pathId(request)),
+  );
+  app.get("/api/local/dots/:id/computer/control", (request) =>
+    broker.computerControlStatus(pathId(request)),
+  );
+  app.post("/api/local/dots/:id/computer/control", (request) =>
+    broker.setComputerControl(
+      pathId(request),
+      z
+        .object({ mode: z.enum(["agent", "human"]) })
+        .strict()
+        .parse(request.body).mode,
+    ),
   );
   app.post("/api/local/dots/:id/computer/start", async (request) => {
     const id = pathId(request);
@@ -351,9 +365,11 @@ export function createApp(
           predicate: (t) => t.parentId === id,
         })
         .map((task) => broker.publicTask(task)),
-      operations: broker.store.list<ToolOperation>("tool_operations", {
-        predicate: (op) => op.taskId === id,
-      }),
+      operations: broker.store
+        .list<ToolOperation>("tool_operations", {
+          predicate: (op) => op.taskId === id,
+        })
+        .map((operation) => broker.publicOperation(operation)),
     };
   });
   app.post("/api/local/tasks/:id/cancel", async (request) =>
@@ -663,6 +679,7 @@ export function createApp(
   );
   app.post(
     "/api/internal/model/:id/v1/chat/completions",
+    { bodyLimit: 16 * 1024 * 1024 },
     async (request, reply) => {
       const task = broker.store.require<Task>("tasks", pathId(request));
       if (
@@ -676,6 +693,13 @@ export function createApp(
         })
         .passthrough()
         .parse(request.body);
+      const prepared = prepareModelImages(body.messages);
+      if (
+        prepared.imageCount &&
+        task.profileSnapshot.capabilities?.vision !== true
+      )
+        throw new Error("This local model has not passed its vision test.");
+      body.messages = prepared.messages;
       const controller = new AbortController();
       reply.raw.on("close", () => {
         if (!reply.raw.writableEnded) controller.abort();
@@ -698,8 +722,7 @@ export function createApp(
         const settings = broker.settings();
         const root = broker.store.require<Task>("tasks", task.rootId);
         const estimate =
-          Math.ceil(JSON.stringify(body.messages).length / 3) +
-          task.profileSnapshot.maxOutputTokens;
+          prepared.estimatedTokens + task.profileSnapshot.maxOutputTokens;
         const reconcileUsage = (usage: unknown) => {
           if (!usage || typeof usage !== "object") return;
           const reported = usage as {

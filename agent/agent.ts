@@ -22,7 +22,16 @@ export default defineAgent({
         return {
           model: wrapLanguageModel({
             model: provider.chatModel(context.model.modelId),
-            middleware: coordinationToolPolicy(context.isDotCoordinator),
+            middleware: coordinationToolPolicy(context.isDotCoordinator, {
+              computer:
+                !!context.dot &&
+                context.model.vision === true &&
+                context.role !== "coordinator" &&
+                !context.isDotCoordinator,
+              computerReadOnly: ["investigator", "reviewer"].includes(
+                context.role,
+              ),
+            }),
           }),
           modelContextWindowTokens: context.model.contextWindow,
         };

@@ -901,6 +901,144 @@ test("Dots can be personalized and selected while their real computer files rema
       }));
     expect(canvasSize.width).toBeGreaterThan(600);
     expect(canvasSize.height).toBeGreaterThan(400);
+    await expect(page.getByRole("status")).toContainText(
+      "Agent has control · You are watching",
+    );
+    const viewerIsReadOnly = () =>
+      desktop.locator("html").evaluate(async () => {
+        const modulePath = "./app/ui.js";
+        const { default: ui } = await import(modulePath);
+        return ui.rfb.viewOnly;
+      });
+    await expect.poll(viewerIsReadOnly).toBe(true);
+    broker.updateSettings({ paused: false });
+    const computerParent = broker.createTask({
+      sessionId: session.id,
+      role: "coordinator",
+      prompt: "Have a worker verify the real graphical desktop controls.",
+      title: "Verify shared desktop control",
+    });
+    const computerDelegation = await broker.executeTool({
+      taskId: computerParent.id,
+      callId: "gui-delegate-computer",
+      toolName: "delegate",
+      input: {
+        role: "coder",
+        prompt:
+          "Use the graphical desktop and verify its shared input controls.",
+        title: "Graphical desktop verification",
+        wait: false,
+      },
+    });
+    const computerWorker = broker.store.require<Task>(
+      "tasks",
+      String(computerDelegation.childTaskId),
+    );
+    broker.store.update<Task>("tasks", computerWorker.id, {
+      status: "running",
+      profileSnapshot: {
+        ...computerWorker.profileSnapshot,
+        capabilities: { streaming: true, tools: true, vision: true },
+      },
+    });
+    const computerAction = (input: Record<string, unknown>) =>
+      broker.executeTool({
+        taskId: computerWorker.id,
+        callId: randomUUID(),
+        toolName: "computer",
+        input,
+      });
+    const moved = await computerAction({
+      action: "move",
+      x: 123,
+      y: 87,
+      durationMs: 700,
+    });
+    expect(moved.result).toMatchObject({ cursor: { x: 123, y: 87 } });
+    const agentCursor = desktop.locator("#cit-agent-cursor");
+    await expect(agentCursor).toBeVisible();
+    await expect(agentCursor).toHaveAttribute("data-x", "123");
+    await expect(agentCursor).toHaveAttribute("data-y", "87");
+    const pointerMapping = await agentCursor.evaluate((pointer) => {
+      const canvas = document.querySelector("#noVNC_container canvas")!;
+      const bounds = canvas.getBoundingClientRect();
+      const cursorBounds = pointer.getBoundingClientRect();
+      const data = (pointer as HTMLElement).dataset;
+      return {
+        x: cursorBounds.left,
+        y: cursorBounds.top,
+        expectedX:
+          bounds.left + (Number(data.x) / Number(data.width)) * bounds.width,
+        expectedY:
+          bounds.top + (Number(data.y) / Number(data.height)) * bounds.height,
+      };
+    });
+    expect(pointerMapping.x).toBeCloseTo(pointerMapping.expectedX, 0);
+    expect(pointerMapping.y).toBeCloseTo(pointerMapping.expectedY, 0);
+    const moveSamples: { x: number; y: number }[] = [];
+    let movePending = true;
+    const collectMove = (async () => {
+      while (movePending) {
+        const point = await agentCursor.evaluate((pointer) => ({
+          x: Number((pointer as HTMLElement).dataset.x),
+          y: Number((pointer as HTMLElement).dataset.y),
+        }));
+        moveSamples.push(point);
+        await delay(50);
+      }
+    })();
+    try {
+      const smoothMove = await computerAction({
+        action: "move",
+        x: 423,
+        y: 287,
+        durationMs: 1500,
+      });
+      expect(smoothMove.result).toMatchObject({ cursor: { x: 423, y: 287 } });
+    } finally {
+      movePending = false;
+      await collectMove;
+    }
+    expect(
+      moveSamples.some(
+        (point) =>
+          point.x > 123 && point.x < 423 && point.y > 87 && point.y < 287,
+      ),
+      `The live viewer must show an intermediate real pointer position before the smooth move returns: ${JSON.stringify(moveSamples)}`,
+    ).toBe(true);
+    await expect(agentCursor).toHaveAttribute("data-x", "423");
+    await expect(agentCursor).toHaveAttribute("data-y", "287");
+    const finalMapping = await agentCursor.evaluate((pointer) => {
+      const bounds = document
+        .querySelector("#noVNC_container canvas")!
+        .getBoundingClientRect();
+      const cursorBounds = pointer.getBoundingClientRect();
+      const data = (pointer as HTMLElement).dataset;
+      return {
+        x: cursorBounds.left,
+        y: cursorBounds.top,
+        expectedX: bounds.left + (423 / Number(data.width)) * bounds.width,
+        expectedY: bounds.top + (287 / Number(data.height)) * bounds.height,
+      };
+    });
+    expect(finalMapping.x).toBeCloseTo(finalMapping.expectedX, 0);
+    expect(finalMapping.y).toBeCloseTo(finalMapping.expectedY, 0);
+    await page
+      .getByRole("button", { name: "Take control", exact: true })
+      .click();
+    await expect(page.getByRole("status")).toContainText(
+      "You have control · Agent input paused",
+    );
+    await expect.poll(viewerIsReadOnly).toBe(false);
+    await expect(agentCursor).toBeHidden();
+    const blocked = await computerAction({
+      action: "move",
+      x: 124,
+      y: 88,
+    }).catch((error) => ({ result: { error: String(error) } }));
+    expect(blocked.result).toMatchObject({
+      error: expect.stringMatching(/human|control|input/i),
+    });
     const container = desktopContainerName(
       broker.config.dataDir,
       "dot-primary",
@@ -966,6 +1104,72 @@ test("Dots can be personalized and selected while their real computer files rema
         return response.ok() ? (await response.json()).content : "";
       })
       .toBe("Keyboard input reached the real Ubuntu desktop\n");
+    await page
+      .getByRole("button", { name: "Give control back", exact: true })
+      .click();
+    await expect(page.getByRole("status")).toContainText(
+      "Agent has control · You are watching",
+    );
+    await expect.poll(viewerIsReadOnly).toBe(true);
+    await computerAction({ action: "key", keys: ["Alt", "F2"] });
+    const windowTree = async () =>
+      (await exec("docker", ["exec", container, "xwininfo", "-root", "-tree"]))
+        .stdout;
+    await expect.poll(windowTree).toContain("Application Finder");
+    await computerAction({
+      action: "type",
+      text: "xfce4-terminal --disable-server --title 'CIT agent UI verification' --geometry 90x24+120+120",
+    });
+    await computerAction({ action: "key", keys: ["Return"] });
+    await expect.poll(windowTree).toContain("CIT agent UI verification");
+    const geometry = await exec("docker", [
+      "exec",
+      container,
+      "xdotool",
+      "search",
+      "--name",
+      "^CIT agent UI verification$",
+      "getwindowgeometry",
+      "--shell",
+    ]);
+    const windowX = Number(geometry.stdout.match(/^X=(\d+)$/m)?.[1]);
+    const windowY = Number(geometry.stdout.match(/^Y=(\d+)$/m)?.[1]);
+    expect(Number.isFinite(windowX) && Number.isFinite(windowY)).toBe(true);
+    await computerAction({
+      action: "click",
+      x: windowX + 160,
+      y: windowY + 100,
+    });
+    await computerAction({ action: "scroll", direction: "down", amount: 2 });
+    await computerAction({
+      action: "type",
+      text: "printf 'Agent UI input reached the real desktop\\n' > /workspace/agent-keyboard-check.txt",
+    });
+    await computerAction({ action: "key", keys: ["Return"] });
+    await expect
+      .poll(async () => {
+        const response = await page.request.get(
+          `${webUrl}/api/local/dots/dot-primary/computer/file?path=agent-keyboard-check.txt`,
+        );
+        return response.ok() ? (await response.json()).content : "";
+      })
+      .toBe("Agent UI input reached the real desktop\n");
+    await computerAction({
+      action: "move",
+      x: windowX + 330,
+      y: windowY + 140,
+      durationMs: 500,
+    });
+    await expect(agentCursor).toBeVisible();
+    await expect(agentCursor).toHaveAttribute("data-x", String(windowX + 330));
+    await page.screenshot({
+      path: join(screenshotsDir, "computer-agent.png"),
+      fullPage: true,
+      animations: "disabled",
+    });
+    broker.store.update("tasks", computerWorker.id, { status: "completed" });
+    broker.store.update("tasks", computerParent.id, { status: "completed" });
+    broker.updateSettings({ paused: true });
   }
   await page.screenshot({
     path: join(screenshotsDir, "computer.png"),

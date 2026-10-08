@@ -57,7 +57,7 @@ These paths are under `CIT_DATA_DIR` if you customize it. The interactive deskto
 
 Inside both the sandbox runner and graphical desktop, the persistent home is `/home/cit`, the workspace is `/workspace` and artifacts are `/artifacts`. Keeping those paths stable allows home-installed tools, including virtual environments, to work across desktop start/stop.
 
-Agents can read and write files and run commands in this computer, including launching graphical apps through its display session. Direct automated screenshot, mouse and keyboard tools are not included. You can operate the live desktop interactively through noVNC.
+Dot workers can read and write files and run commands in this computer. For graphical work, edit the worker's local model profile, enable **Use screenshots for computer tasks**, and run **Check connection**. A passing image and tool-call test enables screenshot-based computer use: coders can move, click, scroll, type, press keys and drag; investigators and reviewers can inspect screenshots. The parent Dot delegates those actions. Open Computer to watch its real cursor, select **Take control** to use the mouse and keyboard yourself, then **Give control back** to resume worker input.
 
 Each desktop is a Docker container sharing the host kernel. It uses an internal network without outbound internet and does not receive the host Docker socket or GPU devices. The browser is available for local content; starting a desktop does not grant internet access. Approved network-enabled agent commands use the existing separate approval mechanism.
 

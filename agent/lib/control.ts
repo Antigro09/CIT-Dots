@@ -20,6 +20,7 @@ export interface WorkerContext {
     contextWindow: number;
     maxOutputTokens: number;
     temperature: number;
+    vision?: boolean;
   };
   messages: { role: string; content: string }[];
   memory: string;

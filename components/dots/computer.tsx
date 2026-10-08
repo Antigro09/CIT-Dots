@@ -10,6 +10,7 @@ import {
   Folder,
   LoaderCircle,
   Maximize2,
+  MousePointer2,
   Play,
   RefreshCw,
   Save,
@@ -31,6 +32,73 @@ interface DesktopStatus {
 export interface ComputerInfo {
   dotId: string;
   desktop: DesktopStatus;
+}
+interface ComputerControl {
+  mode: "agent" | "human";
+  cursor: { x: number; y: number; width: number; height: number } | null;
+  updatedAt?: string;
+  lastAction?: string;
+  activeTaskId?: string;
+  pending?: boolean;
+}
+function useComputerControl(path: string | null, revision: number) {
+  const [data, setData] = useState<ComputerControl | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const currentPath = useRef<string | null>(null);
+  const generation = useRef(0);
+  useEffect(() => {
+    const token = ++generation.current;
+    if (currentPath.current !== path) {
+      currentPath.current = path;
+      setData(null);
+      setError(null);
+    }
+    if (!path) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      let interval = 500;
+      try {
+        const result = await localApi<ComputerControl>(
+          path,
+          "GET",
+          undefined,
+          controller.signal,
+        );
+        if (controller.signal.aborted || token !== generation.current) return;
+        setData(result);
+        setError(null);
+        interval = result.activeTaskId ? 100 : 250;
+      } catch (cause) {
+        if (controller.signal.aborted || token !== generation.current) return;
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Desktop controls are unavailable.",
+        );
+      }
+      // Cursor reads can involve X11; never overlap or cancel a slow read merely
+      // because the next polling interval elapsed.
+      if (token === generation.current)
+        timer = setTimeout(() => void poll(), interval);
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [path, revision]);
+  return {
+    data,
+    error,
+    confirm: (mode: ComputerControl["mode"], pending = false) => {
+      // A successful ownership POST supersedes every cursor read started
+      // before it, especially when returning control from the human.
+      generation.current++;
+      setData({ mode, cursor: null, pending });
+      setError(null);
+    },
+  };
 }
 interface ComputerFiles {
   files: { path: string; type: "file" | "directory"; size?: number }[];
@@ -55,7 +123,19 @@ export function ComputerView({
   const [reconnect, setReconnect] = useState(0);
   const [changing, setChanging] = useState(false);
   const desktop = info.data?.desktop;
+  const [ownershipRevision, setOwnershipRevision] = useState(0);
+  const [ownershipChanging, setOwnershipChanging] = useState(false);
+  const ownership = useComputerControl(
+    desktop?.state === "running" && tab === "desktop"
+      ? `/dots/${dot.id}/computer/control`
+      : null,
+    ownershipRevision,
+  );
+  const humanControl =
+    ownership.data?.mode === "human" && !ownership.data.pending;
   const frame = useRef<HTMLIFrameElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   useEffect(() => {
     setTab(
       new URLSearchParams(window.location.search).get("tab") === "files"
@@ -63,6 +143,59 @@ export function ComputerView({
         : "desktop",
     );
   }, [dot.id]);
+  useEffect(() => {
+    if (!desktop?.url) {
+      setViewerUrl(null);
+      return;
+    }
+    const url = new URL(desktop.url);
+    const fragment = new URLSearchParams(url.hash.slice(1));
+    fragment.set("cit_parent_origin", window.location.origin);
+    fragment.set("cit_dot_id", dot.id);
+    fragment.set("view_only", "true");
+    url.hash = fragment.toString();
+    setViewerUrl(url.toString());
+  }, [desktop?.url, dot.id]);
+  useEffect(() => {
+    if (!viewerUrl) return;
+    const origin = new URL(viewerUrl).origin;
+    const send = () => {
+      frame.current?.contentWindow?.postMessage(
+        {
+          type: "cit-desktop-control",
+          dotId: dot.id,
+          mode:
+            ownership.error || ownershipChanging || ownership.data?.pending
+              ? "agent"
+              : (ownership.data?.mode ?? "agent"),
+          cursor:
+            ownership.error || ownership.data?.pending
+              ? null
+              : (ownership.data?.cursor ?? null),
+        },
+        origin,
+      );
+    };
+    const ready = (event: MessageEvent) => {
+      if (
+        event.source === frame.current?.contentWindow &&
+        event.origin === origin &&
+        event.data?.type === "cit-desktop-ready" &&
+        event.data.dotId === dot.id
+      )
+        send();
+    };
+    window.addEventListener("message", ready);
+    send();
+    return () => window.removeEventListener("message", ready);
+  }, [
+    dot.id,
+    viewerUrl,
+    ownership.data,
+    ownership.error,
+    ownershipChanging,
+    reconnect,
+  ]);
   const control = (action: "start" | "stop") => {
     setChanging(true);
     void state
@@ -71,6 +204,22 @@ export function ComputerView({
         setRevision((value) => value + 1);
       })
       .finally(() => setChanging(false));
+  };
+  const setOwnership = (mode: "agent" | "human") => {
+    setOwnershipChanging(true);
+    void state
+      .run(async () => {
+        const result = await localApi<ComputerControl>(
+          `/dots/${dot.id}/computer/control`,
+          "POST",
+          { mode },
+        );
+        if (result.mode !== mode)
+          throw new Error("Desktop control change was not confirmed.");
+        ownership.confirm(result.mode, result.pending);
+        setOwnershipRevision((value) => value + 1);
+      })
+      .finally(() => setOwnershipChanging(false));
   };
   return (
     <div className="computer-view">
@@ -152,17 +301,36 @@ export function ComputerView({
         {tab === "desktop" && desktop?.state === "running" && desktop.url ? (
           <div className="desktop-display-actions">
             <button
+              className={`button small ${humanControl ? "subtle" : "primary"}`}
+              disabled={
+                state.busy ||
+                ownershipChanging ||
+                !ownership.data ||
+                !!ownership.error
+              }
+              onClick={() => setOwnership(humanControl ? "agent" : "human")}
+            >
+              {ownershipChanging ? (
+                <LoaderCircle size={13} className="spin" />
+              ) : (
+                <MousePointer2 size={13} />
+              )}
+              {humanControl ? "Give control back" : "Take control"}
+            </button>
+            <button
               className="icon-button"
               aria-label="Make desktop fullscreen"
               onClick={() => {
-                void frame.current?.requestFullscreen().catch(() => undefined);
+                void viewport.current
+                  ?.requestFullscreen()
+                  .catch(() => undefined);
               }}
             >
               <Maximize2 size={15} />
             </button>
             <a
               className="icon-button"
-              href={desktop.url}
+              href={`/dots/${dot.id}/computer`}
               target="_blank"
               rel="noreferrer"
               aria-label="Open desktop in a new window"
@@ -179,20 +347,44 @@ export function ComputerView({
           dot={dot}
           revision={snapshot.eventsCursor}
         />
-      ) : desktop?.state === "running" && desktop.url ? (
+      ) : desktop?.state === "running" && viewerUrl ? (
         <div className="desktop-frame">
-          <iframe
-            ref={frame}
-            key={`${dot.id}-${reconnect}`}
-            src={desktop.url}
-            title={`${dot.name}'s Ubuntu desktop`}
-            allow="clipboard-read; clipboard-write; fullscreen"
-            referrerPolicy="no-referrer"
-          />
+          <div
+            ref={viewport}
+            className={`desktop-viewport ${humanControl && !ownership.error && !ownershipChanging ? "human-control" : "agent-control"}`}
+          >
+            <iframe
+              ref={frame}
+              key={`${dot.id}-${reconnect}`}
+              src={viewerUrl}
+              title={`${dot.name}'s Ubuntu desktop`}
+              tabIndex={
+                humanControl && !ownership.error && !ownershipChanging ? 0 : -1
+              }
+              allow="clipboard-read; clipboard-write; fullscreen"
+              referrerPolicy="no-referrer"
+            />
+            {!humanControl || ownership.error || ownershipChanging ? (
+              <div
+                className="desktop-watch-shield"
+                aria-label="Watching the agent's desktop. Take control to use the mouse and keyboard."
+              />
+            ) : null}
+          </div>
           <div className="desktop-caption">
-            <span>
-              <Terminal size={13} />A real Linux desktop, running on your
-              workstation.
+            <span role="status" aria-live="polite">
+              <MousePointer2 size={13} />
+              {ownershipChanging
+                ? "Changing desktop control…"
+                : ownership.error
+                  ? "Control connection unavailable · View only"
+                  : !ownership.data
+                    ? "Connecting to desktop controls…"
+                    : ownership.data.pending
+                      ? "Input is paused · Try Take control again"
+                      : humanControl
+                        ? "You have control · Agent input paused"
+                        : "Agent has control · You are watching"}
             </span>
             <span>Closing this page keeps it running.</span>
           </div>

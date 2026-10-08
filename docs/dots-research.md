@@ -1,6 +1,6 @@
 # Dots: researched behavior and the local implementation contract
 
-Research checked **October 7, 2026** against OpenAI's public product documentation, Help Center, launch announcement and technical system card. The announcement was published September 29, 2026. Meta's official Muse page is a secondary comparison. This report separates public evidence, the user's screenshots and requested local policies. It describes observable behavior; private prompts, internal services and model capabilities are not reproducible from these sources.
+Research checked **October 7, 2026** against OpenAI's public product documentation, Help Center, launch announcement and technical system card. Computer-use, takeover and visible-cursor research was extended on **October 7, 2026**, using the client's America/New_York date. The announcement was published September 29, 2026. Meta's official Muse page is a secondary comparison. This report separates public evidence, the user's screenshots and requested local policies. It describes observable behavior; private prompts, internal services and model capabilities are not reproducible from these sources.
 
 ## The coordinator model
 
@@ -42,7 +42,21 @@ A Dot has its own persistent cloud computer, files, software and browser session
 
 Local access is optional and separately granted. Steps on a connected local computer require that computer to be online with the desktop app running. Losing connectivity and revoking access are different states; local child tasks do not automatically migrate into the cloud. [Enterprise local computer access](https://learn.chatgpt.com/docs/enterprise/cloud-local-access)
 
-CIT's per-Dot Ubuntu 26.04/Xfce computer runs locally in Docker. It has a real interactive desktop and persistent owned storage, but shares the workstation's kernel. It is not a separate VM, and it cannot compute while the workstation is off. Human noVNC control does not establish automated screenshot, mouse or keyboard agent tools.
+CIT's per-Dot Ubuntu 26.04/Xfce computer runs locally in Docker. It has a real interactive desktop and persistent owned storage, but shares the workstation's kernel. It is not a separate VM, and it cannot compute while the workstation is off. Human noVNC control and worker-driven graphical input are distinct capabilities. The local computer-use extension adds worker screenshot and input tools; its acceptance evidence belongs in [verification](verification.md).
+
+### Graphical actions, visible cursor and human takeover
+
+OpenAI's current computer-use API describes a feedback loop: supply the current screen, execute model-requested mouse or keyboard actions in the environment, then return a fresh screenshot to check the result. Resized screenshots require mapping action coordinates back to the real display. A generated action marked complete does not mean the application has executed it successfully. This is public integration guidance, not a disclosure of Dots' private desktop implementation. [Computer-use API](https://developers.openai.com/api/docs/guides/tools-computer-use)
+
+ChatGPT's desktop Computer Use documentation confirms actual graphical interaction, including pointer movement, typing and screenshots, with permission to use the target apps. It distinguishes visual verification from checking files or command output. [Desktop Computer Use](https://learn.chatgpt.com/docs/computer-use) Dots separately documents viewing its computer, explicitly taking over mouse and keyboard, and returning control. [Dots computers](https://learn.chatgpt.com/docs/dots/computers-and-apps)
+
+The sources do not specify Dots' cursor animation or transport. CIT's visible worker cursor is a local implementation choice: show coordinates reported by real backend actions over the corresponding desktop image, including display scaling. An animation alone is not evidence of a mouse action or task completion. Verification should establish a real application change and the resulting screenshot.
+
+noVNC's cursor rendering handles a cursor image and local pointer events; that alone is not a remote worker position feed. Its `viewOnly` property suppresses client input, so exclusive human takeover also requires backend ownership checks that prevent workers from injecting input. [noVNC cursor implementation, v1.6.0](https://github.com/novnc/noVNC/blob/v1.6.0/core/util/cursor.js), [noVNC API](https://novnc.com/noVNC/docs/API.html)
+
+CIT delegates these graphical operations to execution workers. The parent Dot continues coordinating and reporting prose. Takeover changes who may operate the owned desktop; it does not expand approved paths or grant internet access. The existing offline container network remains in force. Graphical tool execution must be tested separately from a particular local model's ability to interpret screenshots and choose useful actions.
+
+The current Help page marks the older ChatGPT agent mode as retired and directs users to Work. Its older description should not be treated as the current Dots architecture. [ChatGPT agent status](https://help.openai.com/en/articles/11752874-chatgpt-agent)
 
 ### Memory, permissions and lifecycle
 
@@ -94,7 +108,7 @@ This table is an implementation contract and gap map, not an assertion that ever
 | Schedules               | Public saved recurring work                                   | Store instructions, time zone, timing and notification policy; distinguish run cancellation from schedule cancellation.                                      |
 | Proactive research      | Public read-only background research                          | Treat private research agents as a separate future mode; do not call unrestricted execution or idle polling the same feature.                                |
 | Events                  | Public supported event monitoring                             | Add real connector event admission and deduplication before claiming event-driven monitoring.                                                                |
-| Own computer            | Public persistent computer and human takeover                 | Preserve the real local graphical desktop. Automated graphical agent control remains a separate missing capability.                                          |
+| Own computer            | Public persistent computer and human takeover                 | Add worker screenshots and real graphical input on the owned desktop, visible executed coordinates and exclusive human takeover; verify actual app changes.  |
 | Permissions             | Public delegated actions retain permissions                   | Enforce approved folders, owner boundaries and specific external-action approvals at the broker.                                                             |
 | Memory                  | Public selected context and saved notes                       | Persist per-Dot memories; independently owned Chat/Work must not inherit them. CIT's editable memory UI is a local choice.                                   |
 | Pause/stop              | Public parent, child and schedule controls differ             | Document CIT's current global pause and cancellation semantics; do not imply an identical vendor lifecycle.                                                  |
@@ -123,6 +137,9 @@ Acceptance scenarios should cover:
 - An unrelated worker completion does not automatically attach files. Unchanged scheduled results do not produce repeated pings.
 - Nonblocking delegation returns before worker completion. Status inspection identifies the same task, and a follow-up reaches that existing worker session without creating a duplicate assignment. Worker completion triggers a parent review.
 - A new priority can be supplied while a worker runs. The Dot remains available, retains the right task context and does not transfer unrelated permissions.
+- A worker observes the real desktop, clicks and types into an application, and returns a new screenshot showing the result. The visible cursor corresponds to executed desktop coordinates, including when the viewer is scaled.
+- Human takeover prevents worker input until control is returned. Viewing alone does not grant input control, and another Dot cannot control the selected computer.
+- Graphical input preserves existing workspace and offline-network boundaries. Passing deterministic action tests does not claim an untested local vision model can reliably navigate arbitrary apps.
 - Restart preserves the Dot identity, canonical conversation, worker lineage and pending state without duplicate delivery or blind execution replay.
 
 ## Muse comparison
@@ -131,7 +148,7 @@ Meta describes a persistent dedicated VM, background work after app closure, rev
 
 ## Source coverage and limitations
 
-The research used twelve primary references: the linked OpenAI feature page, launch article, six Learn Dots chapters, two Help Center articles, enterprise local-access guide and system-card Dots appendix. Meta's page was checked separately. All OpenAI pages were readable through the web tool. Meta's direct page extraction returned no readable lines, so its official indexed text supplied the limited comparison. No account automation, authenticated product internals or vendor computer contents were inspected.
+The October 7 research used twelve primary references: the linked OpenAI feature page, launch article, six Learn Dots chapters, two Help Center articles, enterprise local-access guide and system-card Dots appendix. Meta's page was checked separately. The October 7 computer-use follow-up additionally checked the current computer-use API, desktop Computer Use guide, ChatGPT agent status and noVNC's upstream documentation and cursor source. All OpenAI pages were readable through the web tool. Meta's direct page extraction returned no readable lines, so its official indexed text supplied the limited comparison. No account automation, authenticated product internals or vendor computer contents were inspected.
 
 The documentation itself has release differences: Learn describes texting as coming soon, while Help describes a limited texting beta. The Help Reset summary and privacy FAQ also discuss deletion at different levels. Preserve those distinctions rather than infer a universal account behavior. Neither affects the user's text-only local scope.
 

@@ -224,6 +224,92 @@ desktopTest(
     assert.match(await authenticateDisplay(started.url!), /CIT Dots/);
     const name = await manager.containerName(primary);
     assert.equal(name, desktopContainerName(dataDir, primary));
+    const moved = await manager.action(primary, {
+      action: "move",
+      x: 220,
+      y: 180,
+      durationMs: 200,
+    });
+    assert.deepEqual(moved.cursor, { x: 220, y: 180 });
+    assert.deepEqual((await manager.cursor(primary))?.cursor, moved.cursor);
+    const captured = await manager.action(primary, { action: "screenshot" });
+    const screenshot = Buffer.from(captured.image!.data, "base64");
+    assert.equal(captured.image!.mimeType, "image/png");
+    assert.equal(screenshot.readUInt32BE(16), captured.width);
+    assert.equal(screenshot.readUInt32BE(20), captured.height);
+    assert.deepEqual(captured.cursor, moved.cursor);
+    await manager.setControl(primary, "human");
+    await assert.rejects(
+      manager.action(primary, { action: "click", x: 220, y: 180 }),
+      /user has control/,
+    );
+    assert.ok(
+      (await manager.action(primary, { action: "screenshot" })).image,
+      "A worker may observe the shared desktop while a human controls it.",
+    );
+    await manager.setControl(primary, "agent");
+    const motion = manager.action(
+      primary,
+      { action: "move", x: 600, y: 450, durationMs: 1500 },
+      undefined,
+      "takeover-motion",
+    );
+    const motionRejected = assert.rejects(motion, /cancel|abort/i);
+    const untilRegistered = Date.now() + 5000;
+    const jobId = (
+      await import("../src/server/computer-control")
+    ).computerActionId("takeover-motion");
+    let live = false;
+    while (Date.now() < untilRegistered) {
+      live = await docker([
+        "exec",
+        name!,
+        "test",
+        "-f",
+        `/tmp/cit-computer-actions/${jobId}.json`,
+      ]).then(
+        () => true,
+        () => false,
+      );
+      if (live) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(
+      live,
+      true,
+      "The real pointer action must be active before human takeover.",
+    );
+    const ownershipCompletion: string[] = [];
+    const takeover = manager.setControl(primary, "human").then((result) => {
+      ownershipCompletion.push(result.mode);
+      return result;
+    });
+    const giveBack = manager.setControl(primary, "agent").then((result) => {
+      ownershipCompletion.push(result.mode);
+      return result;
+    });
+    const [humanControl, agentControl] = await Promise.all([
+      takeover,
+      giveBack,
+    ]);
+    assert.deepEqual(
+      ownershipCompletion,
+      ["human", "agent"],
+      "A later give-back cannot finish before an in-progress human takeover.",
+    );
+    assert.ok(
+      Date.parse(agentControl.updatedAt) > Date.parse(humanControl.updatedAt),
+    );
+    await motionRejected;
+    assert.equal((await manager.controlStatus(primary)).mode, "agent");
+    const takenOver = await manager.cursor(primary);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.deepEqual(
+      (await manager.cursor(primary))?.cursor,
+      takenOver?.cursor,
+      "The injected pointer must stop moving after human takeover returns.",
+    );
+    await manager.setControl(primary, "agent");
     const originalId = (
       await docker(["inspect", "--format", "{{.Id}}", name!])
     ).trim();
@@ -236,6 +322,209 @@ desktopTest(
     );
     assert.equal((await fs.stat(metadataPath)).mode & 0o777, 0o600);
     const primaryComputer = await ensureComputer(dataDir, primary);
+    // Enter a command through real graphical input rather than exec stdin.
+    await docker([
+      "exec",
+      "--detach",
+      name!,
+      "python3",
+      "/opt/cit/desktop-job.py",
+      "run",
+      "c".repeat(64),
+      "20",
+      "xfce4-terminal --disable-server --title='CIT graphical input proof' --geometry=80x24+100+100",
+    ]);
+    const terminalDeadline = Date.now() + 5000;
+    let terminalReady = false;
+    while (Date.now() < terminalDeadline) {
+      terminalReady = await docker([
+        "exec",
+        name!,
+        "xdotool",
+        "search",
+        "--name",
+        "^CIT graphical input proof$",
+      ]).then(
+        () => true,
+        () => false,
+      );
+      if (terminalReady) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(
+      terminalReady,
+      true,
+      "The real terminal must be visible before graphical input.",
+    );
+    await manager.action(primary, { action: "click", x: 250, y: 250 });
+    await manager.action(primary, { action: "key", keys: ["Ctrl", "l"] });
+    await manager.action(primary, {
+      action: "type",
+      text: "printf '%s' 'graphical café input' > /workspace/graphical-input.txt",
+    });
+    await manager.action(primary, { action: "key", keys: ["Return"] });
+    const inputDeadline = Date.now() + 5000;
+    let entered = "";
+    while (Date.now() < inputDeadline) {
+      entered = await fs
+        .readFile(
+          path.join(primaryComputer.workspace, "graphical-input.txt"),
+          "utf8",
+        )
+        .catch(() => "");
+      if (entered) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(
+      entered,
+      "graphical café input",
+      "Literal Unicode typing must reach the live graphical application.",
+    );
+    const keymapBefore = JSON.parse(
+      await docker([
+        "exec",
+        name!,
+        "python3",
+        "-c",
+        "import json; from Xlib import display; d=display.Display(); print(json.dumps(d.query_keymap())); d.close()",
+      ]),
+    ) as number[];
+    const typeOperation = "takeover-long-typing";
+    const typeJobId = (
+      await import("../src/server/computer-control")
+    ).computerActionId(typeOperation);
+    const typingOutcome = manager
+      .action(
+        primary,
+        { action: "type", text: "x".repeat(3000) },
+        undefined,
+        typeOperation,
+      )
+      .then(
+        () => ({ completed: true as const }),
+        (error: Error) => ({ error }),
+      );
+    // Pause the real xdotool child while an ordinary key is down. This makes
+    // interruption between down/up deterministic and checks the cleanup fix,
+    // rather than relying on the timing of one random canceled keystroke.
+    const pausedTyping = JSON.parse(
+      await docker([
+        "exec",
+        name!,
+        "python3",
+        "-c",
+        `
+import json, os, signal, time
+from pathlib import Path
+from Xlib import display, XK
+d = display.Display()
+code = d.keysym_to_keycode(XK.string_to_keysym('x'))
+record = Path('/tmp/cit-computer-actions/' + '${typeJobId}' + '.json')
+deadline = time.monotonic() + 5
+typing_child = None
+while time.monotonic() < deadline:
+    try:
+        info = json.loads(record.read_text())
+        if typing_child is None:
+            # /proc/task/children is absent on some supported kernels.
+            for entry in Path('/proc').iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+                    arguments = (entry / 'cmdline').read_bytes().split(b'\\0')
+                    if int(fields[1]) == info['pid'] and b'xdotool' in arguments:
+                        typing_child = entry.name
+                        break
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+        if typing_child is not None:
+            child = typing_child
+            arguments = Path('/proc/' + child + '/cmdline').read_bytes().split(b'\\0')
+            if b'xdotool' not in arguments:
+                continue
+            if d.query_keymap()[code // 8] & (1 << (code % 8)):
+                os.kill(int(child), signal.SIGSTOP)
+                if d.query_keymap()[code // 8] & (1 << (code % 8)):
+                    print(json.dumps({**info, 'childPid': int(child), 'keyCode': code}), flush=True)
+                    d.close()
+                    raise SystemExit(0)
+                os.kill(int(child), signal.SIGCONT)
+    except (FileNotFoundError, ProcessLookupError, json.JSONDecodeError):
+        pass
+    time.sleep(0.0005)
+d.close()
+raise SystemExit('Could not pause the active typing child while its ordinary key was down.')
+`,
+      ]),
+    ) as { pid: number; childPid: number; keyCode: number };
+    const typingControl = await manager.setControl(primary, "human");
+    assert.equal(typingControl.mode, "human");
+    assert.equal(typingControl.pending, undefined);
+    const stoppedTyping = await typingOutcome;
+    assert.ok(
+      "error" in stoppedTyping,
+      "Long graphical typing must stop when the user takes control.",
+    );
+    assert.match(stoppedTyping.error.message, /cancel|abort/i);
+    await docker([
+      "exec",
+      name!,
+      "python3",
+      "-c",
+      `
+import json
+from pathlib import Path
+from Xlib import display
+assert not Path('/tmp/cit-computer-actions/' + '${typeJobId}' + '.json').exists(), 'Canceled typing action record remains'
+assert not Path('/proc/' + str(${pausedTyping.pid})).exists(), 'Canceled typing helper is still alive'
+assert not Path('/proc/' + str(${pausedTyping.childPid})).exists(), 'Canceled typing child is still alive'
+d = display.Display()
+before = json.loads('${JSON.stringify(keymapBefore)}')
+after = d.query_keymap()
+assert not any(current & ~original for current, original in zip(after, before)), 'Typing cancellation left newly held keycodes'
+assert not after[${pausedTyping.keyCode} // 8] & (1 << (${pausedTyping.keyCode} % 8)), 'The ordinary typed key remains held'
+d.close()
+`,
+    ]);
+    await manager.setControl(primary, "agent");
+    await manager.action(primary, { action: "key", keys: ["Ctrl", "u"] });
+    await manager.action(primary, {
+      action: "scroll",
+      direction: "up",
+      amount: 2,
+      x: 250,
+      y: 250,
+    });
+    await manager.action(primary, {
+      action: "scroll",
+      direction: "down",
+      amount: 2,
+    });
+    const dragged = await manager.action(primary, {
+      action: "drag",
+      x: 900,
+      y: 600,
+      toX: 980,
+      toY: 680,
+      durationMs: 100,
+    });
+    assert.deepEqual(dragged.cursor, { x: 980, y: 680 });
+    await docker([
+      "exec",
+      name!,
+      "python3",
+      "-c",
+      "from Xlib import display, X; d=display.Display(); assert not d.screen().root.query_pointer().mask & X.Button1Mask; d.close()",
+    ]);
+    await docker([
+      "exec",
+      name!,
+      "python3",
+      "/opt/cit/desktop-job.py",
+      "cancel",
+      "c".repeat(64),
+    ]);
     assert.equal(
       await fs
         .readFile(
